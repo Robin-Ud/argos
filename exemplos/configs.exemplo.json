@@ -1,0 +1,61 @@
+{
+  "usuario": {
+    "nome": "Ana",
+    "ela": true,
+    "sobre": "estudante de biologia em Campinas",
+    "cidade": "Campinas",
+    "assistente": "o Argos"
+  },
+  "fuso": "America/Sao_Paulo",
+
+  "modelo": "claude-sonnet-5-5",
+  "modelo_agenda": "claude-haiku-5-5",
+  "esforco_leitura": "medium",
+  "esforco_agenda": "medium",
+  "agenda_reset_min": 30,
+
+  "hora_padrao_tarefa": "09:00",
+  "cobrar_a_cada_h": 3,
+  "janela_cobranca": [
+    "06:00",
+    "23:00"
+  ],
+  "memoria_revisao_dias": 14,
+  "hora_revisao_memoria": "10:00",
+
+  "motor_dir": "dados/motor",
+  "git_sync": false,
+  "hora_manutencao": "06:00",
+  "manutencao_repetir_dias": 3,
+  "espera_fotos_s": 12,
+  "tolerancia_total": 0.03,
+  "km_max_sem_registro": 3000,
+
+  "clima_lat": -22.9,
+  "clima_lon": -47.06,
+  "chuva_limiar": 70,
+  "hora_chuva_noite": "21:00",
+  "hora_chuva_manha": "06:30",
+  "chuva_aviso": true,
+
+  "postos_municipio": "CAMPINAS",
+  "postos_estado": "SAO PAULO",
+  "postos_raio_km": 5,
+  "hora_postos": "05:00",
+
+  "alerta_nome": "Campinas",
+  "alerta_geocode": "3509502",
+  "alerta_lat": -22.9,
+  "alerta_lon": -47.06,
+  "alerta_rajada_kmh": 70,
+  "alerta_chuva_mm_h": 30,
+  "alerta_chuva_mm_dia": 60,
+  "alerta_silencio": [
+    "23:00",
+    "06:00"
+  ],
+  "alerta_intervalo_min": 30,
+
+  "prompt_extra": "ACADEMIA: {ele} treina seg/qua/sex às 18h; não marque nada nesse horário sem perguntar.",
+  "google_escopos_extra": []
+}

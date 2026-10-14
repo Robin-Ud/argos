@@ -1,0 +1,5 @@
+target/
+dados/
+configs.json
+.claude/
+CLAUDE.local.md

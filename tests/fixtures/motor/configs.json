@@ -1,0 +1,21 @@
+{
+  "veiculos_index": {
+    "Honda CG 160 Titan": "veiculos/titan_22.json",
+    "Chevrolet Onix": "veiculos/onix_19.json"
+  },
+  "combustiveis": [
+    "gasolina_comum",
+    "gasolina_aditivada",
+    "etanol",
+    "diesel"
+  ],
+  "categorias_menu": [
+    "Abastecimento",
+    "Manutenção Preventiva",
+    "Acessórios / Upgrades",
+    "Manutenção Corretiva",
+    "Burocracia",
+    "Alterar Veículo",
+    "Alterar Data"
+  ]
+}

@@ -1,0 +1,30 @@
+[package]
+name = "argos"
+version = "0.1.0"
+edition = "2021"
+description = "Argos — assistente pessoal no Telegram (agenda, tarefas, memória, manutenção e abastecimento)"
+license-file = "LICENSE.md"
+publish = false
+
+[dependencies]
+# HTTP bloqueante com rustls (sem OpenSSL: não depende da libssl da VM); sem gzip
+ureq = { version = "2.12", default-features = false, features = ["tls"] }
+serde = { version = "1", features = ["derive"] }
+# preserve_order: dicts do Python mantêm a ordem de inserção (schemas, estado.json, tool results)
+serde_json = { version = "1", features = ["preserve_order"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# só America/Sao_Paulo entra no binário (ver .cargo/config.toml)
+chrono-tz = { version = "0.10", default-features = false, features = ["std", "filter-by-regex"] }
+base64 = "0.22"
+# NFD pro fold() (busca sem acento, igual ao unicodedata.normalize do Python)
+unicode-normalization = { version = "0.1", default-features = false, features = ["std"] }
+regex = { version = "1", default-features = false, features = ["std", "unicode-perl"] }
+# só o inflate (deflate puro em Rust) pra abrir o xlsx semanal da ANP; o zip e o XML são lidos à mão
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

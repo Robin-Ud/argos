@@ -1,0 +1,569 @@
+[
+  {
+    "name": "listar_eventos",
+    "description": "Lista eventos da agenda principal entre duas datas. Use antes de editar/apagar para achar o id, e para responder perguntas sobre a agenda. Eventos recorrentes vêm expandidos (cada ocorrência tem id próprio).",
+    "strict": true,
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "inicio": {
+          "type": "string",
+          "description": "'AAAA-MM-DDTHH:MM' (horário de São Paulo, sem fuso) ou 'AAAA-MM-DD' para dia inteiro"
+        },
+        "fim": {
+          "type": "string",
+          "description": "'AAAA-MM-DDTHH:MM' (horário de São Paulo, sem fuso) ou 'AAAA-MM-DD' para dia inteiro"
+        },
+        "busca": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "palavra pra filtrar no título/local/descrição (ignora acento e maiúscula) ou null pra tudo"
+        }
+      },
+      "required": [
+        "inicio",
+        "fim",
+        "busca"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "horarios_livres",
+    "description": "Horários livres na agenda dentro das janelas dadas (ex.: o horário útil da memória), já descontando os eventos. Use pra 'próximo horário livre/útil', 'quando dá pra marcar X'. Copie as linhas_prontas, uma por linha (uma por dia), sem recalcular nem juntar numa frase.",
+    "strict": true,
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "janelas": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "janelas de cada dia, 'HH:MM-HH:MM' (ex.: ['08:00-11:59', '14:00-17:49'])"
+        },
+        "inicio": {
+          "type": "string",
+          "description": "'AAAA-MM-DDTHH:MM' de onde começar (pra 'próximo': a hora atual da mensagem)"
+        },
+        "dias": {
+          "type": "integer",
+          "description": "quantos dias olhar, contando o do início (1 a 14; pra 'próximo': 7)"
+        },
+        "duracao_min": {
+          "type": "integer",
+          "description": "tamanho mínimo do buraco em minutos (sem duração dita: 30)"
+        }
+      },
+      "required": [
+        "janelas",
+        "inicio",
+        "dias",
+        "duracao_min"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "criar_evento",
+    "description": "Cria um evento na Google Agenda (NÃO manda aviso pelo bot). Só pra compromissos: quando ele pede pra marcar/agendar, ou consulta, reunião, aula, prova.",
+    "strict": true,
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "titulo": {
+          "type": "string"
+        },
+        "inicio": {
+          "type": "string",
+          "description": "'AAAA-MM-DDTHH:MM' (horário de São Paulo, sem fuso) ou 'AAAA-MM-DD' para dia inteiro"
+        },
+        "fim": {
+          "type": "string",
+          "description": "'AAAA-MM-DDTHH:MM' (horário de São Paulo, sem fuso) ou 'AAAA-MM-DD' para dia inteiro. Sem duração dita: 1h depois. Dia inteiro: dia seguinte ao último dia."
+        },
+        "local": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "descricao": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lembrete_min": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "minutos antes pra notificar; null = padrão da agenda"
+        }
+      },
+      "required": [
+        "titulo",
+        "inicio",
+        "fim",
+        "local",
+        "descricao",
+        "lembrete_min"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "editar_evento",
+    "description": "Altera um evento existente. Campos null ficam como estão.",
+    "strict": true,
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "titulo": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "inicio": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "'AAAA-MM-DDTHH:MM' (horário de São Paulo, sem fuso) ou 'AAAA-MM-DD' para dia inteiro"
+        },
+        "fim": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "'AAAA-MM-DDTHH:MM' (horário de São Paulo, sem fuso) ou 'AAAA-MM-DD' para dia inteiro"
+        },
+        "local": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "descricao": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "titulo",
+        "inicio",
+        "fim",
+        "local",
+        "descricao"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "apagar_evento",
+    "description": "Pede pra apagar um evento. NÃO apaga na hora: mostra um botão de confirmação pro usuário. Um evento por chamada.",
+    "strict": true,
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "criar_tarefa",
+    "description": "Lembrete/tarefa do bot: na hora certa o bot MANDA MENSAGEM no Telegram e cobra a cada poucas horas até ele marcar feito. Use pra todo \"me lembra/me avisa/me cobra\" e rotinas (varrer a casa, regar planta, comprar algo, levantar do sofá daqui 3 min).",
+    "strict": true,
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "texto": {
+          "type": "string",
+          "description": "a tarefa, curta, como ele vai ler na cobrança"
+        },
+        "quando": {
+          "type": "string",
+          "description": "quando vence: 'AAAA-MM-DDTHH:MM' se ele deu horário; senão só 'AAAA-MM-DD' (o bot usa o horário padrão). Nunca invente horário."
+        },
+        "repetir_dias": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "repete a cada N dias (1 diário, 7 semanal, 30 mensal) ou null pra uma vez só"
+        },
+        "contar_desde_feito": {
+          "type": "boolean",
+          "description": "true = a próxima conta a partir de quando ele marcar feito ('a cada 7 dias desde a última vez'); false = agenda fixa ('toda sexta')"
+        },
+        "janelas": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "só cobrar dentro destas janelas 'HH:MM-HH:MM' (ex.: horário útil da memória, se ele pedir 'só em horário útil'); [] = padrão"
+        },
+        "habito": {
+          "type": "boolean",
+          "description": "true = hábito: cada vez que ele fizer vira uma linha no tracker (histórico pra ajustar a frequência) e concluir não pede confirmação. Só se ele pedir pra acompanhar/registrar ou chamar de hábito"
+        },
+        "cobrar_a_cada_h": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "horas entre uma cobrança e outra até ele marcar feito ('me cobra 1x por dia' = 24); null = padrão"
+        }
+      },
+      "required": [
+        "texto",
+        "quando",
+        "repetir_dias",
+        "contar_desde_feito",
+        "janelas",
+        "habito",
+        "cobrar_a_cada_h"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "listar_tarefas",
+    "description": "Lista as tarefas do bot: pendentes (já venceram) e próximas.",
+    "strict": true,
+    "input_schema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "concluir_tarefa",
+    "description": "Marca uma tarefa como feita (ele disse que fez).",
+    "strict": true,
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "apagar_tarefa",
+    "description": "Remove uma tarefa da lista de vez (não é concluir).",
+    "strict": true,
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "adiar_tarefa",
+    "description": "Muda o horário de uma tarefa que já existe (adiar, remanejar, 'me lembra disso às 18'). Pendente: a próxima cobrança vai pro horário novo e a repetição não muda. Ainda não venceu: o vencimento vai pro horário novo. Também muda janelas e intervalo de cobrança de uma tarefa que já existe.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer"
+        },
+        "quando": {
+          "type": "string",
+          "description": "'AAAA-MM-DDTHH:MM' (horário de São Paulo); só 'AAAA-MM-DD' mantém o horário da tarefa; omitido = não mexe no horário (só janelas/intervalo)"
+        },
+        "janelas": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "só cobrar dentro destas janelas 'HH:MM-HH:MM' (ex.: horário útil da memória, se ele pedir 'só em horário útil'); [] = mantém as que ela já tem"
+        },
+        "cobrar_a_cada_h": {
+          "type": "number",
+          "description": "novo intervalo entre cobranças, em horas; omitido = mantém"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "pausar_tarefas",
+    "description": "Pausa tarefas até uma data (viagem, folga, 'não me cobra nada no fim de semana'): nada vence nem cobra até lá. Repetição fixa ('todo dia') pula o que cairia na pausa; o resto volta a cobrar quando ela acabar.",
+    "strict": true,
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "ids": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "description": "ids das tarefas; [] = todas"
+        },
+        "ate": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "'AAAA-MM-DDTHH:MM' em que volta a cobrar; só 'AAAA-MM-DD' = volta no começo desse dia; null = tira a pausa agora"
+        }
+      },
+      "required": [
+        "ids",
+        "ate"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "lembrar",
+    "description": "Salva um fato na memória (uma frase autocontida). Fato temporário ganha validade e some sozinho depois.",
+    "strict": true,
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "texto": {
+          "type": "string"
+        },
+        "valido_ate": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "'AAAA-MM-DD': último dia em que o fato vale; null = permanente ou quando usar evento_ref"
+        },
+        "evento_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "se o fato é sobre um evento da agenda ou ele disse 'até lá': uma palavra do nome do evento (ex.: 'estagio'); o bot acha o evento e usa o fim dele como validade. null se não for sobre evento"
+        }
+      },
+      "required": [
+        "texto",
+        "valido_ate",
+        "evento_ref"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "corrigir_memoria",
+    "description": "Reescreve um fato da memória que mudou.",
+    "strict": true,
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer"
+        },
+        "texto": {
+          "type": "string"
+        },
+        "valido_ate": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "'AAAA-MM-DD' ou null = permanente"
+        }
+      },
+      "required": [
+        "id",
+        "texto",
+        "valido_ate"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "esquecer",
+    "description": "Apaga um fato da memória permanente.",
+    "strict": true,
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "desfazer_ultimo",
+    "description": "Desfaz o último grupo de ações gravadas pelo bot (abastecimento, manutenção, evento criado/alterado/apagado, tarefa, memória). Use quando ele pedir pra desfazer/voltar atrás/\"não era isso\".",
+    "strict": true,
+    "input_schema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "ver_manutencao",
+    "description": "Manutenções vencidas dos veículos, pelo check_maintenance do motoregis (CSVs do MotorCostTracker): cada item vencido com o atraso já calculado, há quanto tempo foi feito, o prazo e a data da última vez. Use pra qualquer pergunta sobre manutenção, atraso ou o que está vencido.",
+    "strict": true,
+    "input_schema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "previsao_chuva",
+    "description": "Previsão de chuva hora a hora de um dia (até 7 dias à frente): os períodos com probabilidade >= limiar e cada hora com alguma chance (% e mm). Hoje começa da hora atual.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "dia": {
+          "type": "string",
+          "description": "AAAA-MM-DD"
+        },
+        "limiar": {
+          "type": "number",
+          "description": "% mínimo pros períodos; omitido = o do aviso automático (70)"
+        }
+      },
+      "required": [
+        "dia"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "registrar_manutencao",
+    "description": "Registra manutenção preventiva feita num veículo do MotorCostTracker (ex.: lubrificou a corrente, calibrou pneus). Sem odometro, a km é estimada pela média km/dia dos abastecimentos e ele confirma num botão antes de gravar.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "veiculo": {
+          "type": "string"
+        },
+        "itens": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "chaves exatas da lista de itens do veículo"
+        },
+        "custo_total": {
+          "type": "number",
+          "description": "R$ total; omitido se ele não disse (grava 0)"
+        },
+        "data": {
+          "type": "string",
+          "description": "AAAA-MM-DD do dia em que ele fez ('ontem' = a data de ontem pelo carimbo); omitido = hoje"
+        },
+        "odometro": {
+          "type": "number",
+          "description": "km do odômetro, só se ele disse; omitido = estimada"
+        }
+      },
+      "required": [
+        "veiculo",
+        "itens"
+      ],
+      "additionalProperties": false
+    }
+  }
+]

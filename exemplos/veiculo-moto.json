@@ -1,0 +1,35 @@
+{
+  "veiculo": "",
+  "ano": 0,
+  "tipo": "moto",
+  "notas": {
+    "base": "Modelo genérico do Argos: confira os intervalos no manual da sua moto e ajuste aqui."
+  },
+  "nomes_display": {
+    "limpar_lubrificar_corrente": "Lubrif. corrente",
+    "verificar_esticar_corrente": "Esticar corrente",
+    "inspecionar_filtro_ar": "Filtro de ar",
+    "trocar_oleo_e_filtro": "Óleo e filtro",
+    "trocar_fluido_freios": "Fluido de freios",
+    "calibrar_pneus": "Calibrar pneus"
+  },
+  "manutencoes": {
+    "por_quilometragem": {
+      "limpar_lubrificar_corrente": 500,
+      "verificar_esticar_corrente": 1000,
+      "inspecionar_filtro_ar": 5000,
+      "trocar_oleo_e_filtro": 5000,
+      "trocar_fluido_freios": 20000
+    },
+    "por_tempo_meses": {
+      "inspecionar_filtro_ar": 6,
+      "trocar_oleo_e_filtro": 6,
+      "trocar_fluido_freios": 24
+    },
+    "por_tempo_dias": {
+      "calibrar_pneus": 15,
+      "limpar_lubrificar_corrente": 15,
+      "verificar_esticar_corrente": 30
+    }
+  }
+}

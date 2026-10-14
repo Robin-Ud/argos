@@ -1,0 +1,17 @@
+# /etc/systemd/system/argos.service — uma cópia por pessoa, mudando ARGOS_DIR/WorkingDirectory
+# (o mesmo binário serve várias instâncias, cada uma com o seu token do Telegram)
+[Unit]
+Description=Argos (bot de Telegram)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=SEU_USUARIO
+Environment=ARGOS_DIR=/home/SEU_USUARIO/argos-ana
+WorkingDirectory=/home/SEU_USUARIO/argos-ana
+ExecStart=/usr/local/bin/argos
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

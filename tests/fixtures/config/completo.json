@@ -1,0 +1,51 @@
+{
+  "usuario": {
+    "nome": "Pedro",
+    "ela": false,
+    "sobre": "engenheiro agrônomo em Ponta Grossa",
+    "cidade": "Ponta Grossa"
+  },
+  "motor_dir": "dados/motor",
+  "cred_dir": "credenciais",
+  "modelo": "claude-sonnet-5-5",
+  "modelo_agenda": "claude-haiku-5-5",
+  "esforco_leitura": "medium",
+  "esforco_agenda": "medium",
+  "agenda_reset_min": 30,
+  "hora_manutencao": "06:00",
+  "manutencao_repetir_dias": 3,
+  "hora_padrao_tarefa": "09:00",
+  "cobrar_a_cada_h": 3,
+  "janela_cobranca": [
+    "06:00",
+    "23:00"
+  ],
+  "memoria_revisao_dias": 14,
+  "hora_revisao_memoria": "10:00",
+  "git_sync": false,
+  "espera_fotos_s": 12,
+  "tolerancia_total": 0.03,
+  "km_max_sem_registro": 3000,
+  "clima_lat": -25.0916,
+  "clima_lon": -50.1668,
+  "chuva_limiar": 70,
+  "hora_chuva_noite": "21:00",
+  "hora_chuva_manha": "06:30",
+  "postos_municipio": "PONTA GROSSA",
+  "postos_estado": "PARANA",
+  "postos_raio_km": 5,
+  "hora_postos": "05:00",
+  "alerta_nome": "Ponta Grossa",
+  "alerta_geocode": "4119905",
+  "alerta_lat": -25.0916,
+  "alerta_lon": -50.1668,
+  "alerta_rajada_kmh": 70,
+  "alerta_chuva_mm_h": 30,
+  "alerta_chuva_mm_dia": 60,
+  "alerta_silencio": [
+    "23:00",
+    "06:00"
+  ],
+  "alerta_intervalo_min": 30,
+  "prompt_extra": "ACADEMIA: {ele} treina seg/qua/sex às 18h; não marque nada nesse horário sem perguntar."
+}

@@ -1,0 +1,4 @@
+[env]
+# o chrono-tz embute só estes fusos (Brasil e Lisboa; o resto do tzdb fica de fora do binário).
+# Outro fuso no configs.json → acrescente aqui e recompile
+CHRONO_TZ_TIMEZONE_FILTER = "(America/(Sao_Paulo|Manaus|Cuiaba|Campo_Grande|Porto_Velho|Rio_Branco|Boa_Vista|Belem|Fortaleza|Recife|Maceio|Bahia|Araguaina|Santarem|Noronha|Eirunepe)|Europe/Lisbon)"

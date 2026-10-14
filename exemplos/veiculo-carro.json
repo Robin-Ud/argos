@@ -1,0 +1,38 @@
+{
+  "veiculo": "",
+  "ano": 0,
+  "tipo": "carro",
+  "notas": {
+    "base": "Modelo genérico do Argos: confira os intervalos no manual do seu carro e ajuste aqui."
+  },
+  "nomes_display": {
+    "trocar_oleo_e_filtro": "Óleo e filtro",
+    "trocar_filtro_ar_motor": "Filtro de ar",
+    "trocar_filtro_habitaculo": "Filtro do habitáculo",
+    "alinhar_e_balancear_rodas": "Alinhamento/balanceamento",
+    "trocar_fluido_freios": "Fluido de freios",
+    "trocar_liquido_refrigeracao": "Líq. arrefecimento",
+    "calibrar_pneus": "Calibrar pneus"
+  },
+  "manutencoes": {
+    "por_quilometragem": {
+      "trocar_oleo_e_filtro": 10000,
+      "trocar_filtro_ar_motor": 10000,
+      "trocar_filtro_habitaculo": 10000,
+      "alinhar_e_balancear_rodas": 10000,
+      "trocar_fluido_freios": 40000,
+      "trocar_liquido_refrigeracao": 80000
+    },
+    "por_tempo_meses": {
+      "trocar_oleo_e_filtro": 12,
+      "trocar_filtro_ar_motor": 12,
+      "trocar_filtro_habitaculo": 12,
+      "alinhar_e_balancear_rodas": 12,
+      "trocar_fluido_freios": 24,
+      "trocar_liquido_refrigeracao": 48
+    },
+    "por_tempo_dias": {
+      "calibrar_pneus": 15
+    }
+  }
+}

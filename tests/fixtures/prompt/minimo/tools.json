@@ -1,0 +1,278 @@
+[
+  {
+    "name": "criar_tarefa",
+    "description": "Lembrete/tarefa do bot: na hora certa o bot MANDA MENSAGEM no Telegram e cobra a cada poucas horas até ela marcar feito. Use pra todo \"me lembra/me avisa/me cobra\" e rotinas (varrer a casa, regar planta, comprar algo, levantar do sofá daqui 3 min).",
+    "strict": true,
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "texto": {
+          "type": "string",
+          "description": "a tarefa, curta, como ela vai ler na cobrança"
+        },
+        "quando": {
+          "type": "string",
+          "description": "quando vence: 'AAAA-MM-DDTHH:MM' se ela deu horário; senão só 'AAAA-MM-DD' (o bot usa o horário padrão). Nunca invente horário."
+        },
+        "repetir_dias": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "repete a cada N dias (1 diário, 7 semanal, 30 mensal) ou null pra uma vez só"
+        },
+        "contar_desde_feito": {
+          "type": "boolean",
+          "description": "true = a próxima conta a partir de quando ela marcar feito ('a cada 7 dias desde a última vez'); false = agenda fixa ('toda sexta')"
+        },
+        "janelas": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "só cobrar dentro destas janelas 'HH:MM-HH:MM' (ex.: horário útil da memória, se ela pedir 'só em horário útil'); [] = padrão"
+        },
+        "habito": {
+          "type": "boolean",
+          "description": "true = hábito: cada vez que ela fizer vira uma linha no tracker (histórico pra ajustar a frequência) e concluir não pede confirmação. Só se ela pedir pra acompanhar/registrar ou chamar de hábito"
+        },
+        "cobrar_a_cada_h": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "horas entre uma cobrança e outra até ela marcar feito ('me cobra 1x por dia' = 24); null = padrão"
+        }
+      },
+      "required": [
+        "texto",
+        "quando",
+        "repetir_dias",
+        "contar_desde_feito",
+        "janelas",
+        "habito",
+        "cobrar_a_cada_h"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "listar_tarefas",
+    "description": "Lista as tarefas do bot: pendentes (já venceram) e próximas.",
+    "strict": true,
+    "input_schema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "concluir_tarefa",
+    "description": "Marca uma tarefa como feita (ela disse que fez).",
+    "strict": true,
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "apagar_tarefa",
+    "description": "Remove uma tarefa da lista de vez (não é concluir).",
+    "strict": true,
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "adiar_tarefa",
+    "description": "Muda o horário de uma tarefa que já existe (adiar, remanejar, 'me lembra disso às 18'). Pendente: a próxima cobrança vai pro horário novo e a repetição não muda. Ainda não venceu: o vencimento vai pro horário novo. Também muda janelas e intervalo de cobrança de uma tarefa que já existe.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer"
+        },
+        "quando": {
+          "type": "string",
+          "description": "'AAAA-MM-DDTHH:MM' (horário de São Paulo); só 'AAAA-MM-DD' mantém o horário da tarefa; omitido = não mexe no horário (só janelas/intervalo)"
+        },
+        "janelas": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "só cobrar dentro destas janelas 'HH:MM-HH:MM' (ex.: horário útil da memória, se ela pedir 'só em horário útil'); [] = mantém as que ela já tem"
+        },
+        "cobrar_a_cada_h": {
+          "type": "number",
+          "description": "novo intervalo entre cobranças, em horas; omitido = mantém"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "pausar_tarefas",
+    "description": "Pausa tarefas até uma data (viagem, folga, 'não me cobra nada no fim de semana'): nada vence nem cobra até lá. Repetição fixa ('todo dia') pula o que cairia na pausa; o resto volta a cobrar quando ela acabar.",
+    "strict": true,
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "ids": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "description": "ids das tarefas; [] = todas"
+        },
+        "ate": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "'AAAA-MM-DDTHH:MM' em que volta a cobrar; só 'AAAA-MM-DD' = volta no começo desse dia; null = tira a pausa agora"
+        }
+      },
+      "required": [
+        "ids",
+        "ate"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "lembrar",
+    "description": "Salva um fato na memória (uma frase autocontida). Fato temporário ganha validade e some sozinho depois.",
+    "strict": true,
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "texto": {
+          "type": "string"
+        },
+        "valido_ate": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "'AAAA-MM-DD': último dia em que o fato vale; null = permanente ou quando usar evento_ref"
+        },
+        "evento_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "se o fato é sobre um evento da agenda ou ela disse 'até lá': uma palavra do nome do evento (ex.: 'estagio'); o bot acha o evento e usa o fim dele como validade. null se não for sobre evento"
+        }
+      },
+      "required": [
+        "texto",
+        "valido_ate",
+        "evento_ref"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "corrigir_memoria",
+    "description": "Reescreve um fato da memória que mudou.",
+    "strict": true,
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer"
+        },
+        "texto": {
+          "type": "string"
+        },
+        "valido_ate": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "'AAAA-MM-DD' ou null = permanente"
+        }
+      },
+      "required": [
+        "id",
+        "texto",
+        "valido_ate"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "esquecer",
+    "description": "Apaga um fato da memória permanente.",
+    "strict": true,
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "desfazer_ultimo",
+    "description": "Desfaz o último grupo de ações gravadas pelo bot (abastecimento, manutenção, evento criado/alterado/apagado, tarefa, memória). Use quando ela pedir pra desfazer/voltar atrás/\"não era isso\".",
+    "strict": true,
+    "input_schema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    }
+  }
+]
