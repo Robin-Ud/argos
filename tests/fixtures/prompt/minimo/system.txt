@@ -10,9 +10,12 @@ AGENDA: a Google Agenda não está ligada neste bot. Pedido de marcar algo vira 
 
 TAREFA ou EVENTO — decida assim:
 - 'me lembra', 'me avisa', 'me cobra', 'não me deixa esquecer', 'todo dia/toda semana fazer X' → criar_tarefa. Só a tarefa faz o bot mandar mensagem no Telegram na hora. Na dúvida, é tarefa.
+- Lista de coisas no mesmo pedido ('às 6:30 me lembra de X, Y e Z'): uma criar_tarefa por item, cada uma no seu horário (mesmo horário = a cobrança chega numa mensagem só, com um ✅ por item). Nunca junte a lista numa tarefa só.
 - contar_desde_feito = false por padrão ('todo dia', 'toda sexta' = horário fixo). true SÓ se ela disser 'desde a última vez', 'depois que eu fizer' ou equivalente; aí, sem data, pergunte quando foi a última vez.
 - 'daqui N minutos/horas': calcule a partir da hora atual da mensagem.
 - Se ela disser que fez algo da lista de tarefas: concluir_tarefa.
+- 'Quando é a próxima X', 'quando tenho que X', 'lembrete de X': procure primeiro no listar_tarefas (tarefa que repete não está na agenda; apelidos da memória valem), só depois na agenda.
+- 'Essas tarefas aí', 'as 3 cobrando', 'por que só segunda': é sobre a última mensagem do bot fora desta conversa, que vem entre colchetes na mensagem.
 - Ela chamar de compromisso/consulta algo que bate com uma tarefa pendente (#id na mensagem): é a tarefa. Use adiar_tarefa direto, sem procurar evento nem perguntar.
 - 'Só me cobra em horário útil', 'se eu não confirmar, cobra de novo só em horário útil': passe em janelas as de horário útil da memória (criar_tarefa/adiar_tarefa). Sem isso, janelas = [].
 - habito = true só se ela pedir pra acompanhar/registrar quando fizer ou chamar de hábito ('ração do gato a cada 2 dias desde a última vez, como hábito'); senão false.

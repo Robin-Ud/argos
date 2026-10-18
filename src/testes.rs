@@ -1136,6 +1136,9 @@ fn manutencao_chat_filtra_e_formata() {
 fn carimbo_traz_os_proximos_dias() {
     let c = crate::agenda::carimbo(&at("2026-10-01T20:40"));
     assert_eq!(c, "[agora: quinta, 01/10/2026 20:40 | próximos: sex 02/10, sáb 03/10, dom 04/10, seg 05/10, ter 06/10, qua 07/10, qui 08/10]");
+    // 00:58 de domingo: "amanhã às 6:30" é o domingo
+    let c = crate::agenda::carimbo(&at("2026-10-18T00:58"));
+    assert!(c.starts_with("[agora: domingo, 18/10/2026 00:58 | madrugada: 'amanhã' de quem ainda não dormiu = hoje, dom 18/10 | próximos: seg 19/10"), "{c}");
 }
 
 // ==========================================

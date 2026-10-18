@@ -357,10 +357,13 @@ const AGENDA_SYSTEM: &str = concat!(
     "\n",
     "TAREFA ou EVENTO — decida assim:\n",
     "- 'me lembra', 'me avisa', 'me cobra', 'não me deixa esquecer', 'todo dia/toda semana fazer X' → criar_tarefa. Só a tarefa faz o bot mandar mensagem no Telegram na hora. Na dúvida, é tarefa.\n",
+    "- Lista de coisas no mesmo pedido ('às 6:30 me lembra de X, Y e Z'): uma criar_tarefa por item, cada uma no seu horário (mesmo horário = a cobrança chega numa mensagem só, com um ✅ por item). Nunca junte a lista numa tarefa só.\n",
     "- criar_evento só quando {ele} pedir pra 'marcar'/'agendar'/'pôr na agenda', ou for compromisso com outras pessoas ou lugar (consulta, reunião, aula, prova).\n",
     "- contar_desde_feito = false por padrão ('todo dia', 'toda sexta' = horário fixo). true SÓ se {ele} disser 'desde a última vez', 'depois que eu fizer' ou equivalente; aí, sem data, pergunte quando foi a última vez.\n",
     "- 'daqui N minutos/horas': calcule a partir da hora atual da mensagem.\n",
     "- Se {ele} disser que fez algo da lista de tarefas: concluir_tarefa.\n",
+    "- 'Quando é a próxima X', 'quando tenho que X', 'lembrete de X': procure primeiro no listar_tarefas (tarefa que repete não está na agenda; apelidos da memória valem), só depois na agenda.\n",
+    "- 'Essas tarefas aí', 'as 3 cobrando', 'por que só segunda': é sobre a última mensagem do bot fora desta conversa, que vem entre colchetes na mensagem.\n",
     "- {Ele} chamar de compromisso/consulta algo que bate com uma tarefa pendente (#id na mensagem): é a tarefa. Use adiar_tarefa direto, sem procurar evento nem perguntar.\n",
     "- 'Só me cobra em horário útil', 'se eu não confirmar, cobra de novo só em horário útil': passe em janelas as de horário útil da memória (criar_tarefa/adiar_tarefa). Sem isso, janelas = [].\n",
     "- O bot já não avisa nem cobra durante evento da agenda (com horário; o Sono conta): segura e manda quando o evento acaba. 'Não me cobra quando eu estiver em evento/compromisso' → diga que já é assim; não mexa em janelas.\n",
@@ -627,6 +630,9 @@ pub struct Agenda {
     pub foco_hora: Option<String>,
     /// textos de criar_tarefa já barrados pela `tarefa_parecida` neste pedido (a 2ª tentativa igual passa)
     pub avisou_parecida: Vec<String>,
+    /// última cobrança/resposta de botão de tarefa (não passa pelo modelo): vai só na mensagem seguinte,
+    /// senão "não me cobra dessas 3 aí" e "oxi, pq só segunda" ficavam sem contexto (17/10)
+    pub aviso: Option<(crate::util::Dt, String)>,
 }
 
 impl Bot {
@@ -1103,6 +1109,9 @@ Só grava se ele tocar em Gravar; se ele disser a km certa, chame de novo com od
         if let Some(f) = self.agenda.foco_hora.take() {
             pendentes += &format!("\n[respondendo ao \"pra quando?\" do 🕒 da tarefa {f}]");
         }
+        if let Some((em, txt)) = self.agenda.aviso.take().filter(|(em, _)| (now - *em).num_hours() < 12) {
+            pendentes += &format!("\n[última mensagem do bot fora desta conversa, {}: {}]", em.format("%d/%m %H:%M"), txt);
+        }
         json!({"role": "user", "content": [{"type": "text", "text": format!("{}{pendentes}\n{text}", carimbo(&now))}]})
     }
 
@@ -1206,5 +1215,11 @@ pub fn carimbo(now: &crate::util::Dt) -> String {
             format!("{} {}", dia_semana(&d).chars().take(3).collect::<String>(), d.format("%d/%m"))
         })
         .collect();
-    format!("[agora: {}, {} | próximos: {}]", dia_semana(now), now.format("%d/%m/%Y %H:%M"), dias.join(", "))
+    // 00:58 de domingo, "amanhã às 6:30" virou segunda (18/10): quem não dormiu ainda chama o dia que começou de amanhã
+    let madrugada = if chrono::Timelike::hour(now) < 5 {
+        format!(" | madrugada: 'amanhã' de quem ainda não dormiu = hoje, {} {}", dia_semana(now).chars().take(3).collect::<String>(), now.format("%d/%m"))
+    } else {
+        String::new()
+    };
+    format!("[agora: {}, {}{madrugada} | próximos: {}]", dia_semana(now), now.format("%d/%m/%Y %H:%M"), dias.join(", "))
 }

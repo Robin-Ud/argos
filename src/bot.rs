@@ -1040,7 +1040,14 @@ impl Bot {
             }
         };
         self.send(&texto, Some(kb))?;
+        self.anota_aviso(&texto);
         Ok(())
+    }
+
+    /// o que o bot mandou de tarefa sem passar pelo modelo vai junto na próxima mensagem pra agenda
+    fn anota_aviso(&mut self, texto: &str) {
+        let t = crate::util::tira_tags(texto).replace("\n\nToca no que você já fez:", "");
+        self.agenda.aviso = Some((agora(), t));
     }
 
     /// fim do evento da agenda em que você está agora (Google fora → None: avisa mesmo assim)
@@ -1416,6 +1423,7 @@ impl Bot {
         };
         self.save_state()?;
         self.send(&format!("{}: {msg}", esc(&texto)), undo_button(undo_id))?;
+        self.anota_aviso(&format!("{texto}: {msg}"));
         Ok(())
     }
 
@@ -1437,6 +1445,7 @@ impl Bot {
         let undo_id = push_undo(&mut self.state, &format!("adiar {} tarefas", linhas.len()), ops, &now);
         self.save_state()?;
         self.send(&linhas.join("\n"), undo_button(undo_id))?;
+        self.anota_aviso(&linhas.join("\n"));
         Ok(())
     }
 
