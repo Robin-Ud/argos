@@ -50,6 +50,16 @@
             }
           ],
           "description": "horas entre uma cobrança e outra até ela marcar feito ('me cobra 1x por dia' = 24); null = padrão"
+        },
+        "condicao": {
+          "type": "string",
+          "enum": [
+            "nenhuma",
+            "comercial",
+            "livre",
+            "inicio_mes"
+          ],
+          "description": "quando dá pra fazer: 'comercial' = dia útil em horário comercial (resolver com empresa, banco, órgão); 'livre' = dia útil, quando ela estiver livre na agenda; 'inicio_mes' = só do dia 1 ao 10 (depende do dinheiro do mês); 'nenhuma' = qualquer dia (padrão)"
         }
       },
       "required": [
@@ -59,7 +69,8 @@
         "contar_desde_feito",
         "janelas",
         "habito",
-        "cobrar_a_cada_h"
+        "cobrar_a_cada_h",
+        "condicao"
       ],
       "additionalProperties": false
     }
@@ -111,7 +122,7 @@
   },
   {
     "name": "adiar_tarefa",
-    "description": "Muda o horário de uma tarefa que já existe (adiar, remanejar, 'me lembra disso às 18'). Pendente: a próxima cobrança vai pro horário novo e a repetição não muda. Ainda não venceu: o vencimento vai pro horário novo. Também muda janelas e intervalo de cobrança de uma tarefa que já existe.",
+    "description": "Muda o horário de uma tarefa que já existe (adiar, remanejar, 'me lembra disso às 18'). Pendente: a próxima cobrança vai pro horário novo e a repetição não muda. Ainda não venceu: o vencimento vai pro horário novo. Também muda janelas, intervalo de cobrança e condição de uma tarefa que já existe.",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -132,6 +143,16 @@
         "cobrar_a_cada_h": {
           "type": "number",
           "description": "novo intervalo entre cobranças, em horas; omitido = mantém"
+        },
+        "condicao": {
+          "type": "string",
+          "enum": [
+            "nenhuma",
+            "comercial",
+            "livre",
+            "inicio_mes"
+          ],
+          "description": "quando dá pra fazer: 'comercial' = dia útil em horário comercial (resolver com empresa, banco, órgão); 'livre' = dia útil, quando ela estiver livre na agenda; 'inicio_mes' = só do dia 1 ao 10 (depende do dinheiro do mês); 'nenhuma' = qualquer dia (padrão); omitido = mantém"
         }
       },
       "required": [

@@ -22,6 +22,8 @@ pub enum Atalho {
     Temporal,
     /// consumo e custo (resumo do show_cost_analysis); Some = nome do veículo sem acento (`fold`)
     Custos { veiculo: Option<String> },
+    /// horários em que as cobranças caem (rotina.rs)
+    Rotina,
 }
 
 /// o que muda de instância pra instância nas frases: como se chama cada veículo e o lugar do temporal
@@ -97,6 +99,7 @@ pub fn texto_atalhos(nomes: &Nomes, lugar: &str) -> String {
         "\n".into(),
         "📅 /hoje · /amanha · /semana · /agenda — ou <i>o que tenho sexta?</i>\n".into(),
         "✅ /tarefas — ou <i>minhas tarefas</i>\n".into(),
+        "🗓 /rotina — em que horário de cada dia eu cobro\n".into(),
         format!("🔧 /manutencao — ou <i>como tá {ex1}?</i>, <i>quando calibrei os pneus?</i>\n"),
         "🌧️ /chuva — ou <i>vai chover amanhã?</i>, <i>previsão sexta</i>\n".into(),
         format!("⛈️ /temporal — ou <i>alerta {lugar}</i>, <i>como tá o tempo em {lugar}?</i> (aviso sozinho se vier temporal)\n"),
@@ -118,9 +121,9 @@ pub fn comando_da_linha(l: &str) -> Option<&str> {
 }
 
 /// menu do "/" no Telegram (setMyCommands)
-pub const COMANDOS: [(&str, &str); 12] = [
+pub const COMANDOS: [(&str, &str); 13] = [
     ("atalhos", "o que eu respondo na hora"), ("hoje", "agenda de hoje"), ("amanha", "agenda de amanhã"),
-    ("semana", "agenda da semana"), ("tarefas", "lista de tarefas"), ("manutencao", "manutenção vencida"),
+    ("semana", "agenda da semana"), ("tarefas", "lista de tarefas"), ("rotina", "horários das cobranças"), ("manutencao", "manutenção vencida"),
     ("chuva", "vai chover hoje?"), ("temporal", "alerta de temporal"), ("postos", "onde abastecer"), ("custos", "consumo e custo por veículo"),
     ("desfazer", "desfaz a última gravação"), ("memoria", "revisar memória"),
 ];
@@ -150,6 +153,9 @@ pub fn atalho(text: &str, hoje: NaiveDate, nomes: &Nomes) -> Option<Atalho> {
     }
     if tarefas.is_match(t) {
         return Some(Atalho::Tarefas);
+    }
+    if t == "/rotina" || t == "minha rotina" {
+        return Some(Atalho::Rotina);
     }
     if agenda_cmd.is_match(t) || agenda_q.is_match(t) {
         return Some(quando(t, hoje));

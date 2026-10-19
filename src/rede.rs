@@ -53,6 +53,8 @@ pub struct Telegram {
     file_base: String,
     /// dados/conversa.jsonl (últimas 24 h, ver `conversa.rs`); None = não grava
     pub conversa: Option<std::path::PathBuf>,
+    /// quando saiu a última mensagem (sendMessage/editMessageText que deu certo)
+    pub ultimo_envio: std::cell::Cell<Option<std::time::Instant>>,
 }
 
 impl Telegram {
@@ -62,6 +64,7 @@ impl Telegram {
             base: format!("https://api.telegram.org/bot{token}"),
             file_base: format!("https://api.telegram.org/file/bot{token}"),
             conversa: None,
+            ultimo_envio: Default::default(),
         }
     }
 
@@ -69,6 +72,7 @@ impl Telegram {
         let r = self.call_sem_registro(method, http_timeout, &params)?;
         if let Some(t) = crate::conversa::do_envio(method, &params) {
             self.registra("argos", &t);
+            self.ultimo_envio.set(Some(std::time::Instant::now()));
         }
         Ok(r)
     }

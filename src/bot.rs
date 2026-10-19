@@ -38,6 +38,17 @@ pub struct Config {
     pub hora_padrao_tarefa: String,
     pub cobrar_a_cada_h: f64,
     pub janela_cobranca: (String, String),
+    /// cada cobrança sem resposta multiplica o intervalo por isto, até `cobranca_max_h`
+    pub cobranca_fator: f64,
+    pub cobranca_max_h: f64,
+    /// horários fixos de cobrança ("HH:MM", todo dia), somados aos aprendidos da rotina (rotina.rs)
+    pub horarios_cobranca: Vec<String>,
+    /// a cobrança sai esse tanto antes do horário de costume
+    pub antecedencia_min: f64,
+    /// janelas da condição `comercial` (seg–sex)
+    pub horario_comercial: Vec<String>,
+    /// dia da semana da discussão das tarefas paradas ("sexta"; "" desliga)
+    pub dia_discussao: String,
     pub memoria_revisao_dias: f64,
     pub hora_revisao_memoria: String,
     /// git pull/push no motor_dir (só se ele for um repositório)
@@ -110,6 +121,12 @@ impl Default for Config {
             hora_padrao_tarefa: s("09:00"),
             cobrar_a_cada_h: 3.0,
             janela_cobranca: (s("06:00"), s("23:00")),
+            cobranca_fator: 1.5,
+            cobranca_max_h: 72.0,
+            horarios_cobranca: vec![],
+            antecedencia_min: 20.0,
+            horario_comercial: vec![s("08:00-12:00"), s("13:30-18:00")],
+            dia_discussao: s("sexta"),
             memoria_revisao_dias: 14.0,
             hora_revisao_memoria: s("10:00"),
             git_sync: false,
@@ -185,6 +202,15 @@ impl Config {
         if !falta.is_empty() {
             return Err(Erro::Msg(format!("configs.json: falta {}", falta.join(", "))));
         }
+        for j in &self.horario_comercial {
+            crate::agenda::parse_janela(j).map_err(|e| Erro::Msg(format!("configs.json: horario_comercial: {e}")))?;
+        }
+        for h in &self.horarios_cobranca {
+            chrono::NaiveTime::parse_from_str(h, "%H:%M").map_err(|_| Erro::Msg(format!("configs.json: horarios_cobranca: '{h}' (use 'HH:MM')")))?;
+        }
+        if !self.dia_discussao.is_empty() && !crate::util::WEEKDAYS.contains(&self.dia_discussao.as_str()) {
+            return Err(Erro::Msg(format!("configs.json: dia_discussao {:?} (use {})", self.dia_discussao, crate::util::WEEKDAYS.join(", "))));
+        }
         if self.fuso.parse::<chrono_tz::Tz>().is_err() {
             return Err(Erro::Msg(format!("configs.json: fuso {:?} não está no binário (use um do Brasil, ex. America/Sao_Paulo, ou Europe/Lisbon)", self.fuso)));
         }
@@ -198,8 +224,20 @@ impl Config {
 }
 
 impl Config {
+    /// cobrança só com os horários fixos; a do bot (`Bot::cobranca`) soma os aprendidos da rotina
     pub fn cobranca(&self) -> CfgCobranca {
-        CfgCobranca { cobrar_a_cada_h: self.cobrar_a_cada_h, janela_cobranca: self.janela_cobranca.clone() }
+        let mut c = CfgCobranca::new(self.cobrar_a_cada_h, self.janela_cobranca.clone());
+        c.fator = self.cobranca_fator;
+        c.max_h = self.cobranca_max_h;
+        c.comercial = self.horario_comercial.iter().filter_map(|j| crate::agenda::parse_janela(j).ok()).collect();
+        let fixos = self.horarios_fixos();
+        c.slots = std::array::from_fn(|_| fixos.clone());
+        c
+    }
+
+    /// `horarios_cobranca` (validados no load)
+    pub fn horarios_fixos(&self) -> Vec<chrono::NaiveTime> {
+        self.horarios_cobranca.iter().filter_map(|h| chrono::NaiveTime::parse_from_str(h, "%H:%M").ok()).collect()
     }
 
     pub fn limites_alerta(&self) -> crate::temporal::Limites {
@@ -330,6 +368,16 @@ pub struct Bot {
     pub inmet: crate::temporal::Inmet,
     /// tarefa que espera um horário depois do botão 🕒 (só em memória)
     pub esperando_hora: Option<i64>,
+    /// horários de costume aprendidos (rotina.rs), recalculados uma vez por dia (`atualiza_rotina`)
+    pub rotina: [Vec<chrono::NaiveTime>; 7],
+    pub rotina_dia: Option<chrono::NaiveDate>,
+    /// quando o bot mandou algo sozinho (no `tick`): mensagem logo depois é resposta, não costume
+    pub aviso_em: Option<Instant>,
+    /// tocou ✏️ Corrigir: o próximo texto é correção (número solto vale; não vai pro Haiku)
+    pub corrigindo: bool,
+    /// última mensagem de cobrança em que ninguém tocou (e as tarefas dela): sai quando chega uma que traz
+    /// todas elas de novo (só uma lista viva no chat)
+    pub ultima_cobranca: Option<(i64, Vec<i64>)>,
 }
 
 impl Bot {
@@ -388,11 +436,50 @@ impl Bot {
             clima,
             inmet,
             esperando_hora: None,
+            rotina: Default::default(),
+            rotina_dia: None,
+            aviso_em: None,
+            ultima_cobranca: None,
+            corrigindo: false,
         })
     }
 
     fn send(&self, text: &str, kb: Option<Value>) -> R<Value> {
         self.tg.send(self.chat_id, text, kb, true)
+    }
+
+    /// a cobrança com os horários fixos do config e os de costume aprendidos
+    pub fn cobranca(&self) -> CfgCobranca {
+        let mut c = self.config.cobranca();
+        c.slots = crate::rotina::mistura(&self.config.horarios_fixos(), &self.rotina);
+        c
+    }
+
+    pub fn atividade_path(&self) -> PathBuf {
+        self.state_path.with_file_name("atividade.csv")
+    }
+
+    /// recalcula os horários de costume (e poda o atividade.csv) uma vez por dia
+    pub fn atualiza_rotina(&mut self, now: &crate::util::Dt) {
+        if self.rotina_dia == Some(now.date_naive()) {
+            return;
+        }
+        self.rotina_dia = Some(now.date_naive());
+        let p = self.atividade_path();
+        if let Err(e) = crate::rotina::podar(&p, now) {
+            println!("rotina: {e}");
+        }
+        self.rotina = crate::rotina::habitos(&crate::rotina::ler(&p), now.date_naive(), self.config.antecedencia_min as i64);
+    }
+
+    /// ele apareceu no chat: conta pra rotina, menos se for resposta a algo que o bot mandou sozinho há pouco
+    fn anota_atividade(&self) {
+        if self.aviso_em.is_some_and(|t| t.elapsed().as_secs() < 30 * 60) {
+            return;
+        }
+        if let Err(e) = crate::rotina::registrar(&self.atividade_path(), &agora()) {
+            println!("rotina: {e}");
+        }
     }
 
     /// entrega os recados do bot do parceiro (`recados::receber`): tarefa entra na lista (a de agora cobra já
@@ -575,6 +662,7 @@ impl Bot {
             }
             let data = q.get("data").and_then(Value::as_str).ok_or_else(|| Erro::Chave("'data'".into()))?.to_string();
             self.tg.registra("eu", &crate::conversa::do_botao(q, &data));
+            self.anota_atividade();
             return self.on_button(&data);
         }
         let empty = json!({});
@@ -586,6 +674,7 @@ impl Bot {
         }
         if let Some(t) = crate::conversa::da_mensagem(m) {
             self.tg.registra("eu", &t);
+            self.anota_atividade();
         }
         if m.get("photo").is_some() && !self.config.tem_veiculos {
             self.send("Sem veículo cadastrado neste bot, então não leio foto de abastecimento. Cadastro: <code>argos --veiculo moto|carro \"Nome\" ano</code> na máquina do bot.", None)?;
@@ -755,12 +844,22 @@ impl Bot {
             return Ok(());
         }
         self.agenda.foco_hora = foco;
+        let corrigindo = std::mem::take(&mut self.corrigindo);
         let mut changed = vec![];
         if let (Some(d), Some(ctx)) = (self.draft.as_mut(), self.context.as_ref()) {
             changed = apply_correction(d, text, &ctx.fuel_types, &ctx.nomes())?;
+            if changed.is_empty() && corrigindo {
+                changed = crate::rascunho::numero_solto(d, text, ctx.v(&d.veiculo).last_odo, self.config.km_max_sem_registro);
+            }
         }
         if changed.is_empty() {
             if self.on_draft_question(text)? || self.on_posto_text(text)? {
+                return Ok(());
+            }
+            if corrigindo && self.draft.is_some() {
+                // logo depois do ✏️ é correção: o Haiku não sabe do rascunho e respondia "não entendi"
+                let veiculos = self.context.as_ref().map(|c| c.nomes()).unwrap_or_default();
+                self.send(&crate::rascunho::texto_corrigir(&veiculos, "Não peguei qual campo. Pra corrigir"), None)?;
                 return Ok(());
             }
             return self.on_agenda(text);
@@ -838,7 +937,11 @@ impl Bot {
             return self.on_memory_button(data);
         }
         if data.starts_with("tar:") {
+            self.ultima_cobranca = None; // tocou: essa fica
             return self.on_task_button(data);
+        }
+        if data.starts_with("cnd:") {
+            return self.on_condicao_button(data);
         }
         if data.starts_with("mnt:") || data.starts_with("mnk:") {
             return self.on_maintenance_button(data);
@@ -880,6 +983,7 @@ impl Bot {
                 d.gap = suggest_gap(d, ctx);
             }
             "fix" => {
+                self.corrigindo = true;
                 self.send(&crate::rascunho::texto_corrigir(&ctx.nomes(), "Pra corrigir"), None)?;
                 return Ok(());
             }
@@ -923,6 +1027,15 @@ impl Bot {
         if self.pareamento.is_some() {
             return Ok(()); // sem dono, nada de aviso
         }
+        let enviou = self.tg.ultimo_envio.get();
+        let r = self.tick_dentro();
+        if self.tg.ultimo_envio.get() != enviou {
+            self.aviso_em = self.tg.ultimo_envio.get();
+        }
+        r
+    }
+
+    fn tick_dentro(&mut self) -> R<()> {
         // veículo cadastrado (argos --veiculo) ou login do Google com o bot rodando: vale sem reiniciar
         self.config.detectar();
         if self.config.tem_google && self.gcal.is_none() {
@@ -938,12 +1051,13 @@ impl Bot {
             println!("lembrete do rascunho: {e}");
         }
         let now = agora();
+        self.atualiza_rotina(&now);
         let mut changed = false;
         match self.recados_tick(&now) {
             Ok(n) => changed = n > 0,
             Err(e) => println!("erro nos recados: {e}"),
         }
-        let cfg = self.config.cobranca();
+        let cfg = self.cobranca();
         let mut ocupado = None; // agenda consultada no máximo uma vez por volta, só se alguma tarefa for avisar
         let mut avisos = Vec::new();
         for i in 0..self.state.tarefas.len() {
@@ -974,6 +1088,9 @@ impl Bot {
             if let Err(e) = self.send_memory_review(&now, false) {
                 println!("erro na revisão da memória: {e}");
             }
+            changed = true;
+        }
+        if self.discussao_tick(&now) {
             changed = true;
         }
         if self.anp_tick(&now) {
@@ -1014,22 +1131,24 @@ impl Bot {
             [] => return Ok(()),
             [(i, k)] => {
                 let t = &self.state.tarefas[*i];
-                let head = if *k == Aviso::Vence { "🔔".to_string() } else { format!("⏰ cobrança {}:", t.cobrancas) };
-                (format!("{head} <b>{}</b>", esc(&t.texto)),
+                let head = if *k == Aviso::Vence { "🔔" } else { "⏰" };
+                (format!("{head} <b>{}</b>{}", esc(&t.texto), crate::tarefas::nota_desde(t, &agora())),
                  json!([[botao("✅ feito", &format!("tar:ok:{}", t.id)), botao("⏰ 1h", &format!("tar:1h:{}", t.id)),
                          botao("⏰ amanhã", &format!("tar:am:{}", t.id))],
                         [botao("🕒 outra hora", &format!("tar:qq:{}", t.id))]]))
             }
             _ => {
                 let ts: Vec<(&Tarefa, Aviso)> = avisos.iter().map(|&(i, k)| (&self.state.tarefas[i], k)).collect();
+                let now = agora();
                 let lines = ts.iter().map(|(t, k)| match k {
                     Aviso::Vence => format!("• {} 🔔", esc(&t.texto)),
-                    Aviso::Cobra if t.cobrancas > 1 => format!("• {} <i>({}ª vez)</i>", esc(&t.texto), t.cobrancas),
-                    Aviso::Cobra => format!("• {}", esc(&t.texto)),
+                    Aviso::Cobra => match crate::tarefas::nota_desde(t, &now) {
+                        d if d.is_empty() => format!("• {}", esc(&t.texto)),
+                        d => format!("• {} <i>{}</i>", esc(&t.texto), d.trim_start()),
+                    },
                 }).collect::<Vec<_>>().join("\n");
                 let mut kb: Vec<Value> = ts.iter().map(|(t, _)| {
-                    let rotulo = if t.texto.chars().count() > 28 { format!("{}…", corta(&t.texto, 27).trim_end()) } else { t.texto.clone() };
-                    json!([botao(&format!("✅ {rotulo}"), &format!("tar:ok:{}", t.id)), botao("🕒", &format!("tar:qq:{}", t.id))])
+                    json!([botao(&format!("✅ {}", rotulo_curto(&t.texto)), &format!("tar:ok:{}", t.id)), botao("🕒", &format!("tar:qq:{}", t.id))])
                 }).collect();
                 let ids = ts.iter().map(|(t, _)| t.id.to_string()).collect::<Vec<_>>().join(",");
                 // callback_data passa de 64 bytes → o Telegram recusa a mensagem inteira
@@ -1039,8 +1158,98 @@ impl Bot {
                 (format!("⏰ <b>{} tarefas cobrando</b>:\n{lines}\n\nToca no que você já fez:", ts.len()), Value::Array(kb))
             }
         };
-        self.send(&texto, Some(kb))?;
+        let ids: Vec<i64> = avisos.iter().map(|&(i, _)| self.state.tarefas[i].id).collect();
+        if let Some((velha, de)) = self.ultima_cobranca.take().filter(|(_, de)| de.iter().all(|i| ids.contains(i))) {
+            // a nova traz todas as tarefas da velha, em que ninguém tocou: a velha só ocupa o chat
+            if let Err(e) = self.tg.call("deleteMessage", 30, json!({"chat_id": self.chat_id, "message_id": velha})) {
+                println!("cobrança: não apaguei a anterior ({e}, tarefas {de:?})");
+            }
+        }
+        let r = self.send(&texto, Some(kb))?;
+        self.ultima_cobranca = r.get("message_id").and_then(Value::as_i64).map(|m| (m, ids));
         self.anota_aviso(&texto);
+        Ok(())
+    }
+
+    /// Uma vez por semana (`dia_discussao`, no 1º horário de costume do dia; sem ele, 9h): as tarefas paradas
+    /// (`tarefas::paradas`) numa mensagem, cada uma com ✅/🗑 e o quando dá pra fazer. true = estado mudou
+    pub fn discussao_tick(&mut self, now: &crate::util::Dt) -> bool {
+        use chrono::Datelike;
+        let hoje = now.format("%Y-%m-%d").to_string();
+        if self.config.dia_discussao.is_empty() || crate::util::dia_semana(now) != self.config.dia_discussao
+            || self.state.discussao_checada.as_deref() == Some(hoje.as_str()) {
+            return false;
+        }
+        let slots = &self.cobranca().slots[now.weekday().num_days_from_monday() as usize];
+        let hora = slots.iter().min().copied().unwrap_or(chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap());
+        if now.time() < hora {
+            return false;
+        }
+        self.state.discussao_checada = Some(hoje);
+        if let Err(e) = self.send_discussao(now) {
+            println!("erro na discussão das tarefas: {e}");
+        }
+        true
+    }
+
+    /// a lista das paradas com os botões (nada parado = não manda nada)
+    pub fn send_discussao(&mut self, now: &crate::util::Dt) -> R<bool> {
+        let ts = crate::tarefas::paradas(&self.state);
+        if ts.is_empty() {
+            return Ok(false);
+        }
+        let linhas: Vec<String> = ts.iter().map(|t| format!("• {}{}{}", esc(&t.texto), crate::tarefas::nota_desde(t, now), crate::tarefas::nota_condicao(t))).collect();
+        let mut kb = vec![];
+        for t in &ts {
+            kb.push(json!([botao(&format!("✅ {}", rotulo_curto(&t.texto)), &format!("tar:ok:{}", t.id)), botao("🗑", &format!("tar:rm:{}", t.id))]));
+            kb.push(json!(["comercial", "livre", "inicio_mes", "amanha"].map(|c| botao(rotulo_condicao(c), &format!("cnd:{c}:{}", t.id)))));
+        }
+        let texto = format!(
+            "🗂 <b>{} {} sem resposta</b> — quando dá pra fazer?\n{}\n\n🏢 dia útil, horário comercial · 🆓 dia útil, quando eu estiver livre · 💰 dia 1 a 10 · ➡️ amanhã. Ou me fala em texto.",
+            ts.len(), if ts.len() == 1 { "tarefa" } else { "tarefas" }, linhas.join("\n"));
+        self.send(&texto, Some(Value::Array(kb)))?;
+        self.anota_aviso(&texto);
+        Ok(true)
+    }
+
+    /// botão de condição da discussão: `cnd:<comercial|livre|inicio_mes|amanha>:<id>`. A próxima cobrança vai pro
+    /// primeiro horário que a condição deixa depois do intervalo normal (amanhã = no 1º horário de amanhã)
+    fn on_condicao_button(&mut self, data: &str) -> R<()> {
+        let p: Vec<&str> = data.split(':').collect();
+        let [_, c, id] = p[..] else { return Err(Erro::Valor(format!("botão inválido: {data}"))) };
+        let id = crate::util::py_int(id)?;
+        let Some(pos) = self.state.tarefas.iter().position(|t| t.id == id) else {
+            self.send("Essa tarefa não existe mais.", None)?;
+            return Ok(());
+        };
+        let now = agora();
+        let cfg = self.cobranca();
+        let before = op_tarefa_antes(&self.state.tarefas[pos]);
+        let t = &mut self.state.tarefas[pos];
+        let quando = if c == "amanha" {
+            use chrono::TimeZone;
+            let amanha = now.offset().from_local_datetime(&(now.date_naive() + chrono::Duration::days(1)).and_hms_opt(0, 0, 0).unwrap()).single().unwrap();
+            let alvo = crate::tarefas::encaixe(t, &amanha, &cfg)?;
+            t.pendente = true;
+            crate::tarefas::task_move(t, &alvo, &cfg)?
+        } else {
+            crate::tarefas::set_condicao(t, c)?;
+            if t.pendente {
+                let c = iso(&crate::tarefas::encaixe(t, &(now + crate::tarefas::espera(t, &cfg)), &cfg)?);
+                t.cobrar_em = Some(c.clone());
+                c
+            } else {
+                t.proximo = iso(&crate::tarefas::proximo_permitido(t, &from_iso(&t.proximo)?, &cfg)?);
+                t.proximo.clone()
+            }
+        };
+        let texto = t.texto.clone();
+        let nota = crate::tarefas::nota_condicao(t).trim_start_matches(" · ").to_string();
+        let undo_id = push_undo(&mut self.state, &format!("tarefa {texto}"), vec![before], &now);
+        self.save_state()?;
+        let msg = format!("{}: {}te cobro {}", esc(&texto), if nota.is_empty() { String::new() } else { format!("{nota} — ") }, crate::tarefas::fmt_when(&quando)?);
+        self.send(&msg, undo_button(undo_id))?;
+        self.anota_aviso(&msg);
         Ok(())
     }
 
@@ -1383,7 +1592,7 @@ impl Bot {
         let undo_id = push_undo(&mut self.state, &format!("manutenção {}", s("rotulo")), ops, &agora());
         self.save_state()?;
         self.send(
-            &format!("🔧 registrado: {} em {} (~{} km) <i>{}</i>", esc(&s("rotulo")), s("data"), fmt_g(odo), esc(result["git"].as_str().unwrap_or(""))),
+            &format!("🔧 registrado: {} em {} (~{} km){}", esc(&s("rotulo")), s("data"), fmt_g(odo), nota_git(result["git"].as_str().unwrap_or(""))),
             undo_button(undo_id),
         )?;
         Ok(())
@@ -1413,13 +1622,25 @@ impl Bot {
             self.send(&format!("{}: pra quando? (ex.: <i>18</i>, <i>18h30</i>, <i>amanhã 9</i>)", esc(&texto)), None)?;
             return Ok(());
         }
+        if kind == "rm" {
+            let now = agora();
+            let op = op_tarefa_antes(&self.state.tarefas[pos]);
+            self.state.tarefas.remove(pos);
+            let undo_id = push_undo(&mut self.state, &format!("tirar {texto}"), vec![op], &now);
+            self.save_state()?;
+            let msg = format!("🗑 tirei: {}", esc(&texto));
+            self.send(&msg, undo_button(undo_id))?;
+            self.anota_aviso(&msg);
+            return Ok(());
+        }
         let mut undo_id = None;
         let msg = if kind == "ok" {
             let (msg, ops) = self.conclui_tarefa(id, &now)?;
             undo_id = push_undo(&mut self.state, &format!("tarefa {texto}"), ops, &now);
             msg
         } else {
-            task_snooze(&mut self.state.tarefas[pos], &now, kind, &self.config.cobranca())?
+            let cfg = self.cobranca();
+            task_snooze(&mut self.state.tarefas[pos], &now, kind, &cfg)?
         };
         self.save_state()?;
         self.send(&format!("{}: {msg}", esc(&texto)), undo_button(undo_id))?;
@@ -1432,7 +1653,7 @@ impl Bot {
     fn on_tasks_snooze(&mut self, kind: &str, ids: &str) -> R<()> {
         let ids = ids.split(',').map(crate::util::py_int).collect::<R<Vec<i64>>>()?;
         let now = agora();
-        let cfg = self.config.cobranca();
+        let cfg = self.cobranca();
         let (mut ops, mut linhas) = (Vec::new(), Vec::new());
         for t in self.state.tarefas.iter_mut().filter(|t| ids.contains(&t.id) && t.pendente) {
             ops.push(op_tarefa_antes(t));
@@ -1480,7 +1701,8 @@ impl Bot {
             return Ok(false);
         };
         let before = op_tarefa_antes(&self.state.tarefas[pos]);
-        let novo = crate::tarefas::task_move(&mut self.state.tarefas[pos], &alvo, &self.config.cobranca())?;
+        let cfg = self.cobranca();
+        let novo = crate::tarefas::task_move(&mut self.state.tarefas[pos], &alvo, &cfg)?;
         let undo_id = push_undo(&mut self.state, &format!("tarefa {texto}"), vec![before], &now);
         self.save_state()?;
         self.send(&format!("{}: ⏰ te cobro {}", esc(&texto), crate::tarefas::fmt_when(&novo)?), undo_button(undo_id))?;
@@ -1513,7 +1735,7 @@ impl Bot {
         let odo = result["odometro_usado"].as_f64().unwrap_or(0.0);
         let til = if result["odometro_estimado"].as_bool().unwrap_or(false) { "~" } else { "" };
         self.send(
-            &format!("🔧 registrado: {} ({til}{} km) <i>{}</i>", esc(&label), fmt_g(odo), esc(result["git"].as_str().unwrap_or(""))),
+            &format!("🔧 registrado: {} ({til}{} km){}", esc(&label), fmt_g(odo), nota_git(result["git"].as_str().unwrap_or(""))),
             undo_button(undo_id),
         )?;
         Ok(())
@@ -1549,6 +1771,7 @@ impl Bot {
                 (esc(&r), None)
             }
             Atalho::Tarefas => (tasks_overview(&self.state)?, None),
+            Atalho::Rotina => (crate::rotina::texto_rotina(&self.config.horarios_fixos(), &self.rotina, self.config.antecedencia_min as i64), None),
             Atalho::Agenda { inicio, dias, rotulo } => {
                 let start = crate::util::no_fuso(inicio.and_hms_opt(0, 0, 0).unwrap());
                 let end = crate::util::no_fuso((inicio + chrono::Duration::days(dias)).and_hms_opt(0, 0, 0).unwrap());
@@ -1643,9 +1866,11 @@ impl Bot {
         self.tg.call("sendChatAction", 30, json!({"chat_id": self.chat_id, "action": "typing"}))?;
         let r = self.agenda_ask(text);
         devolve_memoria();
-        let mut reply = r?;
+        let mut reply = r?.trim().to_string();
         if !self.agenda.actions.is_empty() {
-            reply += &format!("\n\n{}", self.agenda.actions.iter().map(|a| format!("✓ {a}")).collect::<Vec<_>>().join("\n"));
+            // o Haiku não repete o recibo (pode até não escrever nada): sem texto, a mensagem é só o recibo
+            let recibo = self.agenda.actions.iter().map(|a| format!("✓ {a}")).collect::<Vec<_>>().join("\n");
+            reply = if reply.is_empty() { recibo } else { format!("{reply}\n\n{recibo}") };
         }
         let desc = crate::util::corta(&self.agenda.actions.join("; "), 120);
         let ops = std::mem::take(&mut self.agenda.undo_ops);
@@ -1713,12 +1938,13 @@ impl Bot {
         self.tg.edit(self.chat_id, msg_id, &text, None)?;
         // manutenção vai com botões logo abaixo (send_maintenance); aqui só o resumo de consumo/custo
         let resumo = sem_manutencao(&report);
-        let msg = if resumo.is_empty() { "✅ salvo".to_string() } else { format!("✅ salvo\n<pre>{}</pre>", esc(resumo)) };
+        // o "✅ salvo" já está no rascunho editado logo acima: aqui só o resumo
+        let msg = if resumo.is_empty() { "✅ salvo".to_string() } else { format!("📊 <pre>{}</pre>", esc(resumo)) };
         let op = op_csv(&ctx.v(&d.veiculo).csv, &[csv_row(d)?], &d.veiculo);
         let desc = format!("abastecimento {} {}", d.veiculo, d.data);
         let undo_id = push_undo(&mut self.state, &desc, vec![op], &agora());
         self.save_state()?;
-        self.send(&format!("{msg}\n<i>{}</i>", esc(&sync)), undo_button(undo_id))?;
+        self.send(&format!("{msg}{}", nota_git(&sync)), undo_button(undo_id))?;
         println!("salvo: {} ({sync})", repr_lista(&csv_row(d)?));
         let vehicle = d.veiculo.clone();
         self.draft = None;
@@ -1729,6 +1955,25 @@ impl Bot {
             self.save_state()?;
         }
         Ok(())
+    }
+}
+
+/// resultado do git pro usuário: só quando deu errado ("push ok", "git desligado" não interessam)
+fn nota_git(sync: &str) -> String {
+    if sync.starts_with("push falhou") { format!("\n<i>⚠️ {}</i>", esc(sync)) } else { String::new() }
+}
+
+/// rótulo de botão com o texto da tarefa (o Telegram corta texto comprido sem reticências)
+fn rotulo_curto(texto: &str) -> String {
+    if texto.chars().count() > 28 { format!("{}…", corta(texto, 27).trim_end()) } else { texto.to_string() }
+}
+
+fn rotulo_condicao(c: &str) -> &'static str {
+    match c {
+        "comercial" => "🏢",
+        "livre" => "🆓",
+        "inicio_mes" => "💰 1–10",
+        _ => "➡️ amanhã",
     }
 }
 

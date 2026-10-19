@@ -318,7 +318,7 @@ fn schemas_estritos() {
 // --- TestTarefas ---
 
 fn cfg() -> CfgCobranca {
-    CfgCobranca { cobrar_a_cada_h: 3.0, janela_cobranca: ("08:00".into(), "22:00".into()) }
+    CfgCobranca::new(3.0, ("08:00".into(), "22:00".into()))
 }
 
 fn at(s: &str) -> Dt {
@@ -975,7 +975,7 @@ fn botoes_manutencao_e_desfazer_ponta_a_ponta() {
     assert_eq!(toque(&mut bot, "mnx")["text"], "👍 nada gravado");
     // confirma: grava e oferece desfazer
     let m = toque(&mut bot, "mnk:0:calibrar_pneus");
-    assert_eq!(m["text"], format!("🔧 registrado: Calibrar pneus (~{km} km) <i>git desligado</i>"));
+    assert_eq!(m["text"], format!("🔧 registrado: Calibrar pneus (~{km} km)"));
     let und = m["reply_markup"]["inline_keyboard"][0][0]["callback_data"].as_str().unwrap().to_string();
     assert_eq!(und, "und:1");
     assert!(std::fs::read_to_string(&csv).unwrap().ends_with(&format!(",{km},2,0.00,0.00,calibrar_pneus\r\n")));
@@ -1014,7 +1014,7 @@ fn manutencao_da_agenda_com_km_estimada_pede_botao() {
     assert_eq!(toque(&mut bot, "mnc:yes")["text"], "Esse pedido já foi resolvido.");
     bot.run_tool("registrar_manutencao", &pede).unwrap();
     let m = toque(&mut bot, "mnc:yes");
-    assert_eq!(m["text"], "🔧 registrado: Lubrif. corrente em 15/09/26 (~4608.5 km) <i>git desligado</i>");
+    assert_eq!(m["text"], "🔧 registrado: Lubrif. corrente em 15/09/26 (~4608.5 km)");
     assert!(std::fs::read_to_string(&csv).unwrap().ends_with("15/09/26,4608.5,2,0.00,0.00,limpar_lubrificar_corrente\r\n"));
     let und = m["reply_markup"]["inline_keyboard"][0][0]["callback_data"].as_str().unwrap().to_string();
     toque(&mut bot, &und);
@@ -1055,7 +1055,7 @@ fn salvar_abastecimento_e_desfazer_ponta_a_ponta() {
     let m = &pedidos[2].corpo;
     // resumo de consumo/custo, sem o bloco de manutenção (que vem com botões logo depois)
     let t = m["text"].as_str().unwrap();
-    assert!(t.starts_with("✅ salvo\n<pre>--- Resumo ---"), "{t}");
+    assert!(t.starts_with("📊 <pre>--- Resumo ---") && !t.contains("git desligado"), "{t}");
     assert!(!t.contains("Manutenções pendentes"), "{t}");
     assert_eq!(m["reply_markup"]["inline_keyboard"][0][0], json!({"text": "↩️ desfazer", "callback_data": "und:1"}));
     // manutenção vencida igual ao aviso das 06:00: um ✅ por item
@@ -2281,7 +2281,7 @@ fn juntar_leituras_complementares_e_conflitantes() {
     let j = juntar(&leitura_bomba(), &leitura_painel(4928.6)).unwrap();
     assert_eq!((j.total_reais, j.litros, j.odometro_km), (Some(54.84), Some(8.86), Some(4928.6)));
     assert_eq!(j.combustivel.as_deref(), Some("gasolina_comum"));
-    assert_eq!(j.observacao, "só a bomba · só o painel");
+    assert_eq!(j.observacao, ""); // a nota de cada foto falava do que faltava nela
     // mesmo valor lido duas vezes (arredondamento) não é conflito
     let quase = Leitura { total_reais: Some(54.8), ..Default::default() };
     assert!(juntar(&leitura_bomba(), &quase).is_some());
@@ -2624,11 +2624,12 @@ fn cobranca_so_no_horario_util() {
     // remanejar pra 12h30 cai às 14h; pra 16h fica 16h
     assert_eq!(task_move(t, &at("2026-10-07T12:30"), &cfg()).unwrap(), iso(&at("2026-10-07T14:00")));
     task_move(t, &at("2026-10-07T16:00"), &cfg()).unwrap();
-    // cobra às 16h; +3h = 19h, fora do útil → amanhã 08h (sem as janelas seria 19h)
-    assert_eq!(task_tick(t, &at("2026-10-07T16:00"), &cfg()).unwrap(), Some(Aviso::Cobra));
+    // cobra às 16h; +3h = 19h, fora do útil → amanhã 08h (sem as janelas seria 19h). Intervalo fixo aqui
+    let fixo = CfgCobranca { fator: 1.0, ..cfg() };
+    assert_eq!(task_tick(t, &at("2026-10-07T16:00"), &fixo).unwrap(), Some(Aviso::Cobra));
     assert_eq!(t.cobrar_em.as_deref(), Some(iso(&at("2026-10-08T08:00")).as_str()));
     // cobra às 10h; +3h = 13h (almoço) → 14h
-    assert_eq!(task_tick(t, &at("2026-10-08T10:00"), &cfg()).unwrap(), Some(Aviso::Cobra));
+    assert_eq!(task_tick(t, &at("2026-10-08T10:00"), &fixo).unwrap(), Some(Aviso::Cobra));
     assert_eq!(t.cobrar_em.as_deref(), Some(iso(&at("2026-10-08T14:00")).as_str()));
     // passou da última janela do dia → 08h do dia seguinte
     assert_eq!(into_janelas(&at("2026-10-09T17:50"), &[(chrono::NaiveTime::from_hms_opt(8, 0, 0).unwrap(), chrono::NaiveTime::from_hms_opt(11, 59, 0).unwrap())]), at("2026-10-10T08:00"));
@@ -2875,11 +2876,12 @@ fn cobrancas_juntas_numa_mensagem() {
     for t in &mut bot.state.tarefas[..2] {
         t.pendente = true;
     }
-    bot.state.tarefas[1].cobrancas = 27;
+    bot.state.tarefas[1].cobrancas = 27; // sem `pendente_desde`: desde o vencimento (14/10)
+    bot.state.tarefas[0].resto.insert("pendente_desde".into(), json!(iso(&crate::util::agora())));
     let ids: Vec<i64> = bot.state.tarefas.iter().map(|t| t.id).collect();
     bot.send_task_alerts(&[(0, Aviso::Cobra), (1, Aviso::Cobra), (2, Aviso::Vence)]).unwrap();
     let m = rx.recv().unwrap().corpo;
-    assert_eq!(m["text"], "⏰ <b>3 tarefas cobrando</b>:\n• regar as plantas\n• acertar com a academia <i>(27ª vez)</i>\n\
+    assert_eq!(m["text"], "⏰ <b>3 tarefas cobrando</b>:\n• regar as plantas\n• acertar com a academia <i>(desde qua 14/10)</i>\n\
                            • limpar a caixa de areia do guajuju e trocar 🔔\n\nToca no que você já fez:");
     let kb = m["reply_markup"]["inline_keyboard"].as_array().unwrap();
     assert_eq!(kb.len(), 4);
@@ -3045,6 +3047,7 @@ fn textos_com_os_veiculos_da_instancia() {
         "⚡ <b>Atalhos</b> (respondo na hora, sem IA):\n", "\n",
         "📅 /hoje · /amanha · /semana · /agenda — ou <i>o que tenho sexta?</i>\n",
         "✅ /tarefas — ou <i>minhas tarefas</i>\n",
+        "🗓 /rotina — em que horário de cada dia eu cobro\n",
         "🔧 /manutencao — ou <i>como tá a moto?</i>, <i>quando calibrei os pneus?</i>\n",
         "🌧️ /chuva — ou <i>vai chover amanhã?</i>, <i>previsão sexta</i>\n",
         "⛈️ /temporal — ou <i>alerta ponta grossa</i>, <i>como tá o tempo em ponta grossa?</i> (aviso sozinho se vier temporal)\n",
@@ -3303,4 +3306,264 @@ fn horarios_livres_por_dia_e_juntos() {
     let de = |n: &str| tools.as_array().unwrap().iter().find(|t| t["name"] == n).unwrap()["input_schema"]["properties"]["de"]["enum"].clone();
     assert_eq!(de("horarios_livres"), json!(["eu", "Pedro", "juntos"]));
     assert_eq!(de("listar_eventos"), json!(["eu", "Pedro"]));
+}
+
+// --- cobrança espaçada, rotina e condição ---
+
+/// 18/10: a mesma lista de 3 tarefas saiu 6× de 3 em 3 h. Sem resposta, cada cobrança espaça ×1,5
+#[test]
+fn cobranca_sem_resposta_espaca() {
+    let mut st = estado();
+    new_task(&mut st, "pegar o drone", "2026-10-19T09:00", None, false, "09:00").unwrap();
+    let t = &mut st.tarefas[0];
+    let c = CfgCobranca::new(3.0, ("06:00".into(), "23:00".into()));
+    assert_eq!(task_tick(t, &at("2026-10-19T09:00"), &c).unwrap(), Some(Aviso::Vence));
+    assert_eq!(&t.cobrar_em.as_ref().unwrap()[..16], "2026-10-19T12:00"); // 3h
+    assert_eq!(task_tick(t, &at("2026-10-19T12:00"), &c).unwrap(), Some(Aviso::Cobra));
+    assert_eq!(&t.cobrar_em.as_ref().unwrap()[..16], "2026-10-19T16:30"); // 4h30
+    assert_eq!(task_tick(t, &at("2026-10-19T16:30"), &c).unwrap(), Some(Aviso::Cobra));
+    assert_eq!(&t.cobrar_em.as_ref().unwrap()[..16], "2026-10-20T06:00"); // 6h45 = 23h15, fora da janela
+    assert_eq!(sem_resposta(t), 2);
+    // ele adiou: recomeça do intervalo normal
+    task_snooze(t, &at("2026-10-20T07:00"), "1h", &c).unwrap();
+    assert_eq!(sem_resposta(t), 0);
+    assert_eq!(task_tick(t, &at("2026-10-20T08:00"), &c).unwrap(), Some(Aviso::Cobra));
+    assert_eq!(&t.cobrar_em.as_ref().unwrap()[..16], "2026-10-20T12:30"); // 1ª sem resposta de novo: 4h30
+    // teto: 39 sem resposta (a academia) não passa de 72 h
+    t.resto.insert("sem_resposta".into(), json!(39));
+    assert_eq!(espera(t, &c), chrono::Duration::hours(72));
+    // tarefa de antes do campo: as cobranças contam como sem resposta
+    t.resto.remove("sem_resposta");
+    t.cobrancas = 2;
+    assert_eq!(espera(t, &c), chrono::Duration::minutes(405));
+}
+
+/// "Regar as plantas" cobrada 28× em 10 dias: a de ontem sem fazer e chegou a de hoje = 🔔 novo, contagem zerada
+#[test]
+fn repeticao_fixa_nova_vez_zera() {
+    let mut st = estado();
+    new_task(&mut st, "regar as plantas", "2026-10-19T09:00", Some(1), false, "09:00").unwrap();
+    let t = &mut st.tarefas[0];
+    let c = cfg();
+    assert_eq!(task_tick(t, &at("2026-10-19T09:00"), &c).unwrap(), Some(Aviso::Vence));
+    assert_eq!(task_tick(t, &at("2026-10-19T12:00"), &c).unwrap(), Some(Aviso::Cobra));
+    assert_eq!((t.cobrancas, sem_resposta(t)), (1, 1));
+    assert_eq!(task_tick(t, &at("2026-10-20T09:00"), &c).unwrap(), Some(Aviso::Vence));
+    assert_eq!((t.pendente, t.cobrancas, sem_resposta(t)), (true, 0, 0));
+    assert_eq!(&t.proximo[..16], "2026-10-21T09:00");
+    assert_eq!(&t.resto["pendente_desde"].as_str().unwrap()[..16], "2026-10-20T09:00");
+}
+
+fn hm(s: &str) -> chrono::NaiveTime {
+    chrono::NaiveTime::parse_from_str(s, "%H:%M").unwrap()
+}
+
+/// rotina semanal: segunda ele aparece 07:30 e 22:00, sábado só 11:00; costume = mediana − 20 min
+#[test]
+fn rotina_por_dia_da_semana() {
+    use crate::rotina::{habitos, mistura, sessoes};
+    let n = |s: &str| at(s).naive_local();
+    let mut evs = vec![];
+    // 4 segundas (21/09 … 12/10)
+    for (d, manha) in [("2026-09-21", "07:25"), ("2026-09-28", "07:40"), ("2026-10-05", "07:30"), ("2026-10-12", "07:35")] {
+        evs.push(n(&format!("{d}T{manha}")));
+        evs.push(n(&format!("{d}T{manha}")) + chrono::Duration::minutes(10)); // mesma sessão
+        evs.push(n(&format!("{d}T22:00")));
+    }
+    evs.push(n("2026-10-05T15:00")); // uma vez só: não é costume
+    for d in ["2026-09-26", "2026-10-03", "2026-10-10"] {
+        evs.push(n(&format!("{d}T11:00")));
+    }
+    // 2 terças só: pouco pra aprender
+    evs.push(n("2026-10-06T08:00"));
+    evs.push(n("2026-10-13T08:00"));
+    assert_eq!(sessoes(&evs).len(), evs.len() - 4);
+    let h = habitos(&evs, at("2026-10-19T00:00").date_naive(), 20);
+    assert_eq!(h[0], vec![hm("07:10"), hm("21:40")]); // mediana 07:30 (07:25, 07:30, 07:35, 07:40 → 07:30)
+    assert_eq!(h[5], vec![hm("10:40")]);
+    assert!(h[1].is_empty() && h[6].is_empty());
+    // o dia de hoje não conta (ainda está acontecendo)
+    assert_eq!(habitos(&evs, at("2026-10-12T00:00").date_naive(), 20)[0], vec![hm("07:10"), hm("21:40")]);
+    // fixo perto de um aprendido sai
+    let m = mistura(&[hm("07:30"), hm("12:30")], &h);
+    assert_eq!(m[0], vec![hm("07:10"), hm("12:30"), hm("21:40")]);
+    assert_eq!(m[1], vec![hm("07:30"), hm("12:30")]);
+}
+
+/// a cobrança cai no primeiro horário de costume depois do intervalo, dentro das janelas da tarefa
+#[test]
+fn cobranca_cai_no_horario_de_costume() {
+    let mut st = estado();
+    new_task(&mut st, "pegar o fone", "2026-10-19T09:00", None, false, "09:00").unwrap(); // segunda
+    let t = &mut st.tarefas[0];
+    let mut c = CfgCobranca::new(3.0, ("06:00".into(), "23:00".into()));
+    c.slots[0] = vec![hm("07:10"), hm("12:20"), hm("21:50")];
+    c.slots[1] = vec![hm("06:40"), hm("19:00")];
+    assert_eq!(task_tick(t, &at("2026-10-19T09:00"), &c).unwrap(), Some(Aviso::Vence)); // 🔔 na hora dela
+    assert_eq!(&t.cobrar_em.as_ref().unwrap()[..16], "2026-10-19T12:20"); // 12:00 → 12:20
+    assert_eq!(task_tick(t, &at("2026-10-19T12:20"), &c).unwrap(), Some(Aviso::Cobra));
+    assert_eq!(&t.cobrar_em.as_ref().unwrap()[..16], "2026-10-19T21:50"); // 16:50 → 21:50
+    assert_eq!(task_tick(t, &at("2026-10-19T21:50"), &c).unwrap(), Some(Aviso::Cobra));
+    assert_eq!(&t.cobrar_em.as_ref().unwrap()[..16], "2026-10-20T06:40"); // 21:50 + 6h45 = 04:35 de terça → 06:40
+    // janelas da tarefa: horário de costume fora delas não serve; dia sem nenhum que sirva → início da janela
+    let mut st = estado();
+    new_task(&mut st, "ligar pro banco", "2026-10-19T09:00", None, false, "09:00").unwrap();
+    let t = &mut st.tarefas[0];
+    set_janelas(t, &["08:00-11:59".into(), "14:00-17:49".into()]).unwrap();
+    task_tick(t, &at("2026-10-19T09:00"), &c).unwrap();
+    assert_eq!(&t.cobrar_em.as_ref().unwrap()[..16], "2026-10-19T14:00");
+}
+
+/// condição: comercial só seg–sex no horário comercial; início do mês só do dia 1 ao 10
+#[test]
+fn condicao_da_tarefa() {
+    let c = CfgCobranca::new(3.0, ("06:00".into(), "23:00".into()));
+    let mut st = estado();
+    new_task(&mut st, "acertar com a academia", "2026-10-23T17:00", None, false, "09:00").unwrap(); // sexta
+    let t = &mut st.tarefas[0];
+    assert!(set_condicao(t, "talvez").is_err());
+    set_condicao(t, "comercial").unwrap();
+    assert_eq!(condicao(t), Some(Condicao::Comercial));
+    assert_eq!(proximo_permitido(t, &at("2026-10-23T12:30"), &c).unwrap(), at("2026-10-23T13:30")); // almoço
+    assert_eq!(proximo_permitido(t, &at("2026-10-23T18:30"), &c).unwrap(), at("2026-10-26T08:00")); // sexta à noite → segunda
+    assert_eq!(task_tick(t, &at("2026-10-23T17:00"), &c).unwrap(), Some(Aviso::Vence));
+    assert_eq!(&t.cobrar_em.as_ref().unwrap()[..16], "2026-10-26T08:00"); // 20h → fim de semana → segunda
+    // venceu no sábado: fica quieta e o 🔔 sai segunda, sem contar como cobrança
+    let mut st = estado();
+    new_task(&mut st, "ligar pro banco", "2026-10-24T09:00", None, false, "09:00").unwrap();
+    let t = &mut st.tarefas[0];
+    set_condicao(t, "comercial").unwrap();
+    assert_eq!(task_tick(t, &at("2026-10-24T09:00"), &c).unwrap(), None);
+    assert!(t.pendente);
+    assert_eq!(task_tick(t, &at("2026-10-25T20:00"), &c).unwrap(), None);
+    assert_eq!(task_tick(t, &at("2026-10-26T08:00"), &c).unwrap(), Some(Aviso::Vence));
+    assert_eq!((t.cobrancas, sem_resposta(t)), (0, 0));
+    assert_eq!(task_tick(t, &at("2026-10-26T11:00"), &c).unwrap(), Some(Aviso::Cobra));
+    // início do mês: dorme até o dia 1; livre: pula o fim de semana nas janelas da tarefa
+    let mut st = estado();
+    new_task(&mut st, "comprar o pneu", "2026-10-19T09:00", None, false, "09:00").unwrap();
+    let t = &mut st.tarefas[0];
+    set_condicao(t, "inicio_mes").unwrap();
+    assert_eq!(proximo_permitido(t, &at("2026-10-19T09:00"), &c).unwrap(), at("2026-11-01T06:00"));
+    assert_eq!(proximo_permitido(t, &at("2026-11-10T22:00"), &c).unwrap(), at("2026-11-10T22:00"));
+    assert_eq!(proximo_permitido(t, &at("2026-11-10T23:30"), &c).unwrap(), at("2026-12-01T06:00"));
+    set_condicao(t, "livre").unwrap();
+    set_janelas(t, &["18:00-22:00".into()]).unwrap();
+    assert_eq!(proximo_permitido(t, &at("2026-10-24T10:00"), &c).unwrap(), at("2026-10-26T18:00"));
+    set_condicao(t, "nenhuma").unwrap();
+    assert_eq!(condicao(t), None);
+    assert_eq!(proximo_permitido(t, &at("2026-10-24T10:00"), &c).unwrap(), at("2026-10-24T18:00"));
+}
+
+/// sexta: as paradas sem condição vão numa mensagem com ✅/🗑 e os botões de quando dá pra fazer; cada um com ↩️
+#[test]
+fn discussao_de_sexta_ponta_a_ponta() {
+    let tmp = TempDir::new("argos_discussao.");
+    let motor = tmp.0.join("motor");
+    copia(&fixture("motor"), &motor);
+    let mut bot = bot_de_teste(&tmp.0, &motor);
+    let (url, rx) = claude_falso(vec![(200, json!({"ok": true, "result": {"message_id": 7}})); 20]);
+    bot.tg.base = url.trim_end_matches("/v1/messages").to_string();
+    for txt in ["acertar com a academia", "verificar o pedágio virtual", "regar as plantas"] {
+        new_task(&mut bot.state, txt, "2026-10-09T09:00", None, false, "09:00").unwrap();
+    }
+    for t in &mut bot.state.tarefas {
+        t.pendente = true;
+    }
+    bot.state.tarefas[0].cobrancas = 39; // de antes do sem_resposta
+    bot.state.tarefas[1].resto.insert("sem_resposta".into(), json!(3));
+    bot.state.tarefas[2].resto.insert("sem_resposta".into(), json!(1)); // só 1 sem resposta: fica fora
+    let ids: Vec<i64> = bot.state.tarefas.iter().map(|t| t.id).collect();
+
+    assert!(!bot.discussao_tick(&at("2026-10-22T10:00"))); // quinta
+    assert!(!bot.discussao_tick(&at("2026-10-23T08:30"))); // sexta antes das 9h (sem horário de costume)
+    assert!(bot.discussao_tick(&at("2026-10-23T09:00")));
+    assert!(!bot.discussao_tick(&at("2026-10-23T15:00"))); // uma vez por dia
+    let m = rx.recv().unwrap().corpo;
+    let txt = m["text"].as_str().unwrap();
+    assert!(txt.starts_with("🗂 <b>2 tarefas sem resposta</b>") && txt.contains("academia") && txt.contains("pedágio") && !txt.contains("regar"), "{txt}");
+    let kb = m["reply_markup"]["inline_keyboard"].as_array().unwrap();
+    assert_eq!(kb.len(), 4);
+    assert_eq!(kb[0][1]["callback_data"], format!("tar:rm:{}", ids[0]));
+    assert_eq!(kb[1].as_array().unwrap().iter().map(|b| b["callback_data"].as_str().unwrap().to_string()).collect::<Vec<_>>(),
+               ["comercial", "livre", "inicio_mes", "amanha"].map(|c| format!("cnd:{c}:{}", ids[0])));
+    assert!(kb.iter().flat_map(|l| l.as_array().unwrap()).all(|b| b["callback_data"].as_str().unwrap().len() <= 64));
+
+    let toque = |bot: &mut crate::bot::Bot, data: &str| {
+        bot.handle(&json!({"update_id": 1, "callback_query": {"id": "q", "from": {"id": 1}, "data": data}})).unwrap();
+    };
+    let ultima = |rx: &std::sync::mpsc::Receiver<Pedido>| rx.try_iter().filter(|p| p.headers.starts_with("post /sendmessage")).last().unwrap().corpo;
+    // 🏢 na academia: grava a condição, zera o sem resposta, ↩️ volta tudo
+    toque(&mut bot, &format!("cnd:comercial:{}", ids[0]));
+    let m = ultima(&rx);
+    assert!(m["text"].as_str().unwrap().starts_with("acertar com a academia: 🏢 dia útil, horário comercial — te cobro"), "{}", m["text"]);
+    let t = &bot.state.tarefas[0];
+    assert_eq!((condicao(t), sem_resposta(t)), (Some(Condicao::Comercial), 0));
+    let und = m["reply_markup"]["inline_keyboard"][0][0]["callback_data"].as_str().unwrap().to_string();
+    toque(&mut bot, &und);
+    let t = bot.state.tarefas.iter().find(|t| t.id == ids[0]).unwrap();
+    assert_eq!((condicao(t), sem_resposta(t)), (None, 39));
+    // 🗑 no pedágio: some; ↩️ volta
+    toque(&mut bot, &format!("tar:rm:{}", ids[1]));
+    let m = ultima(&rx);
+    assert_eq!(m["text"], "🗑 tirei: verificar o pedágio virtual");
+    assert!(!bot.state.tarefas.iter().any(|t| t.id == ids[1]));
+    let und = m["reply_markup"]["inline_keyboard"][0][0]["callback_data"].as_str().unwrap().to_string();
+    toque(&mut bot, &und);
+    assert!(bot.state.tarefas.iter().any(|t| t.id == ids[1] && t.pendente));
+    // ➡️ amanhã: cobra amanhã e recomeça o espaçamento
+    toque(&mut bot, &format!("cnd:amanha:{}", ids[1]));
+    let t = bot.state.tarefas.iter().find(|t| t.id == ids[1]).unwrap();
+    assert_eq!(sem_resposta(t), 0);
+    assert!(t.cobrar_em.as_deref().unwrap() > iso(&crate::util::agora()).as_str());
+    // a cada botão, o que ele fez conta pra rotina (não era resposta a um aviso do tick)
+    assert!(crate::rotina::ler(&bot.atividade_path()).len() >= 5);
+}
+
+/// 18/10: a mesma lista saiu 6× e ficou toda no chat. A cobrança que traz de novo todas as tarefas da anterior
+/// (sem toque) apaga a anterior; se a anterior tem tarefa que a nova não traz, ela fica
+#[test]
+fn cobranca_nova_apaga_a_anterior() {
+    let tmp = TempDir::new("argos_apaga.");
+    let motor = tmp.0.join("motor");
+    copia(&fixture("motor"), &motor);
+    let mut bot = bot_de_teste(&tmp.0, &motor);
+    let ok = |id: i64| (200, json!({"ok": true, "result": {"message_id": id}}));
+    let (url, rx) = claude_falso(vec![ok(7), ok(0), ok(8), ok(9), ok(10)]);
+    bot.tg.base = url.trim_end_matches("/v1/messages").to_string();
+    for txt in ["pegar o drone", "pegar o fone"] {
+        new_task(&mut bot.state, txt, "2026-10-18T09:00", None, false, "09:00").unwrap();
+    }
+    bot.send_task_alerts(&[(0, Aviso::Cobra), (1, Aviso::Cobra)]).unwrap();
+    bot.send_task_alerts(&[(0, Aviso::Cobra), (1, Aviso::Cobra)]).unwrap();
+    let urls: Vec<String> = rx.try_iter().map(|p| p.headers.lines().next().unwrap().to_string()).collect();
+    assert!(urls[0].contains("/sendmessage") && urls[1].contains("/deletemessage") && urls[2].contains("/sendmessage"), "{urls:?}");
+    // só o drone agora: a de 2 tarefas (msg 8) fica
+    bot.send_task_alerts(&[(0, Aviso::Cobra)]).unwrap();
+    assert!(rx.try_iter().all(|p| !p.headers.contains("/deletemessage")));
+    // tocou num botão: essa também fica
+    bot.ultima_cobranca = None;
+    bot.send_task_alerts(&[(0, Aviso::Cobra)]).unwrap();
+    assert!(rx.try_iter().all(|p| !p.headers.contains("/deletemessage")));
+}
+
+/// 18/10, depois do ✏️: "55.41 n . 43" (quis dizer total 55,41, não 55,43) caía no Haiku → "não entendi"
+#[test]
+fn numero_solto_no_corrigir() {
+    let ctx = Contexto {
+        veiculos: vec![Veiculo { nome: MOTO.into(), moto: true, csv: String::new(), json: String::new(), last_odo: Some(4176.7), last_fuel_odo: None, last_was_full: true, history: vec![] }],
+        fuel_types: vec!["gasolina_comum".into()],
+    };
+    let l = Leitura { total_reais: Some(55.43), litros: Some(8.16), preco_litro: Some(6.79), observacao: "valores ficaram nulos".into(), ..Default::default() };
+    let mut d = new_draft(&l, &ctx, "18/10/26", 3000.0);
+    assert!(apply_correction(&mut d, "55.41 n . 43", &ctx.fuel_types, &ctx.nomes()).unwrap().is_empty());
+    assert_eq!(numero_solto(&mut d, "55.41 n . 43", Some(4176.7), 3000.0), vec!["total"]);
+    assert_eq!((d.total, d.obs.as_str()), (Some(55.41), ""));
+    assert_eq!(numero_solto(&mut d, "4393 e 8,2", Some(4176.7), 3000.0), vec!["odometro", "litros"]);
+    assert_eq!((d.odometro, d.litros), (Some(4393.0), Some(8.2)));
+    assert!(numero_solto(&mut d, "sei lá 20", Some(4176.7), 3000.0).is_empty());
+    // correção normal também tira a nota velha
+    d.obs = "reflexo".into();
+    assert_eq!(apply_correction(&mut d, "km 4400", &ctx.fuel_types, &ctx.nomes()).unwrap(), vec!["odometro"]);
+    assert!(d.obs.is_empty());
 }

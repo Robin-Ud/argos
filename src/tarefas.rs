@@ -63,6 +63,9 @@ pub struct Estado {
     pub alerta_falha_desde: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alerta_falha_avisada: Option<String>,
+    /// dia em que a discussão das tarefas paradas já saiu
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discussao_checada: Option<String>,
     /// chaves de topo desconhecidas (ex.: recursos novos do argos.py): preservadas no save
     #[serde(flatten)]
     pub resto: Map<String, Value>,
@@ -103,6 +106,7 @@ impl Default for Estado {
             alerta_enviados: Map::new(),
             alerta_falha_desde: None,
             alerta_falha_avisada: None,
+            discussao_checada: None,
             resto: Map::new(),
         }
     }
@@ -140,6 +144,30 @@ pub fn save_state(state: &Estado, path: &Path) -> R<()> {
 pub struct CfgCobranca {
     pub cobrar_a_cada_h: f64,
     pub janela_cobranca: (String, String),
+    /// cada cobrança sem resposta multiplica o intervalo por isto (3h → 4h30 → 6h45…); 1 = fixo
+    pub fator: f64,
+    /// teto do intervalo espaçado, em horas
+    pub max_h: f64,
+    /// horários habituais de cada dia da semana (0 = segunda; rotina.rs): a cobrança cai no primeiro
+    /// que couber depois do intervalo. Tudo vazio = cobra no fim do intervalo, como antes
+    pub slots: [Vec<NaiveTime>; 7],
+    /// janelas do horário comercial (condição `comercial`)
+    pub comercial: Vec<(NaiveTime, NaiveTime)>,
+}
+
+impl CfgCobranca {
+    /// fator 1,5 até 72 h, sem horários habituais, comercial 08:00–12:00 e 13:30–18:00
+    pub fn new(cobrar_a_cada_h: f64, janela_cobranca: (String, String)) -> CfgCobranca {
+        let h = |s: &str| NaiveTime::parse_from_str(s, "%H:%M").unwrap();
+        CfgCobranca {
+            cobrar_a_cada_h,
+            janela_cobranca,
+            fator: 1.5,
+            max_h: 72.0,
+            slots: Default::default(),
+            comercial: vec![(h("08:00"), h("12:00")), (h("13:30"), h("18:00"))],
+        }
+    }
 }
 
 /// day.replace(hour=h, minute=m, second=0, microsecond=0)
@@ -180,10 +208,181 @@ pub fn into_janelas(dt: &Dt, js: &[(NaiveTime, NaiveTime)]) -> Dt {
 
 /// Janelas próprias da tarefa (`janelas` no JSON, ex.: só horário útil) ou a janela de cobrança geral.
 pub fn janela_da_tarefa(t: &Tarefa, dt: &Dt, w: &(String, String)) -> R<Dt> {
-    let js: Vec<(NaiveTime, NaiveTime)> = t.resto.get("janelas").and_then(Value::as_array).map(|a| {
-        a.iter().filter_map(|j| crate::agenda::parse_janela(j.as_str().unwrap_or_default()).ok()).collect()
-    }).unwrap_or_default();
+    let js = janelas_proprias(t);
     if js.is_empty() { into_window(dt, w) } else { Ok(into_janelas(dt, &js)) }
+}
+
+fn janelas_proprias(t: &Tarefa) -> Vec<(NaiveTime, NaiveTime)> {
+    t.resto.get("janelas").and_then(Value::as_array).map(|a| {
+        a.iter().filter_map(|j| crate::agenda::parse_janela(j.as_str().unwrap_or_default()).ok()).collect()
+    }).unwrap_or_default()
+}
+
+/// Quando a tarefa dá pra fazer (`condicao` via `resto`), escolhida na discussão de sexta ou no pedido.
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum Condicao {
+    /// seg–sex em horário comercial (ligar pra empresa)
+    Comercial,
+    /// seg–sex, qualquer hora das janelas; evento da agenda já segura (`ocupado_ate`)
+    Livre,
+    /// do dia 1 ao 10 (o dinheiro caiu)
+    InicioMes,
+}
+
+pub const CONDICOES: [&str; 3] = ["comercial", "livre", "inicio_mes"];
+
+pub fn condicao(t: &Tarefa) -> Option<Condicao> {
+    match t.resto.get("condicao").and_then(Value::as_str)? {
+        "comercial" => Some(Condicao::Comercial),
+        "livre" => Some(Condicao::Livre),
+        "inicio_mes" => Some(Condicao::InicioMes),
+        _ => None,
+    }
+}
+
+/// grava a condição ("nenhuma" tira); conta como resposta (o espaçamento recomeça)
+pub fn set_condicao(t: &mut Tarefa, c: &str) -> R<()> {
+    match c {
+        "nenhuma" => {
+            t.resto.remove("condicao");
+        }
+        c if CONDICOES.contains(&c) => {
+            t.resto.insert("condicao".into(), json!(c));
+        }
+        c => return Err(Erro::Valor(format!("condicao inválida: '{c}' (use {} ou nenhuma)", CONDICOES.join(", ")))),
+    }
+    tocou(t);
+    Ok(())
+}
+
+/// " · 🏢 só dia útil comercial" etc., pra lista e recibo
+pub fn nota_condicao(t: &Tarefa) -> &'static str {
+    match condicao(t) {
+        Some(Condicao::Comercial) => " · 🏢 dia útil, horário comercial",
+        Some(Condicao::Livre) => " · 🆓 dia útil, horário livre",
+        Some(Condicao::InicioMes) => " · 💰 dias 1 a 10",
+        None => "",
+    }
+}
+
+/// Primeiro instante >= dt em que dá pra cobrar a tarefa: janelas (as dela ou a geral; `comercial` usa as
+/// do horário comercial) e dia permitido pela condição (seg–sex; dia 1–10), olhando até 45 dias.
+pub fn proximo_permitido(t: &Tarefa, dt: &Dt, cfg: &CfgCobranca) -> R<Dt> {
+    use chrono::Datelike;
+    let cond = condicao(t);
+    if cond.is_none() {
+        return janela_da_tarefa(t, dt, &cfg.janela_cobranca);
+    }
+    let mut js = match cond {
+        Some(Condicao::Comercial) => cfg.comercial.clone(),
+        _ => janelas_proprias(t),
+    };
+    if js.is_empty() {
+        let (a, b) = &cfg.janela_cobranca;
+        js.push(crate::agenda::parse_janela(&format!("{a}-{b}"))?);
+    }
+    js.sort();
+    for d in 0..45 {
+        let dia = dt.date_naive() + Duration::days(d);
+        let ok = match cond {
+            Some(Condicao::InicioMes) => dia.day() <= 10,
+            _ => dia.weekday().num_days_from_monday() < 5,
+        };
+        if !ok {
+            continue;
+        }
+        for (a, b) in &js {
+            let local = |t: &NaiveTime| dt.offset().from_local_datetime(&dia.and_time(*t)).single().unwrap();
+            if *dt <= local(b) {
+                return Ok((*dt).max(local(a)));
+            }
+        }
+    }
+    Ok(*dt)
+}
+
+/// Próxima cobrança a partir de `minimo` (agora + intervalo): no primeiro horário habitual (`cfg.slots`) do dia
+/// que caiba na tarefa. Dia em que nenhum horário habitual cabe (ex.: comercial e os horários são 7h e 22h)
+/// → o primeiro instante permitido dele. Sem horário habitual nenhum → `proximo_permitido(minimo)`.
+pub fn encaixe(t: &Tarefa, minimo: &Dt, cfg: &CfgCobranca) -> R<Dt> {
+    use chrono::Datelike;
+    if cfg.slots.iter().all(Vec::is_empty) {
+        return proximo_permitido(t, minimo, cfg);
+    }
+    let local = |dia: NaiveDate, h: &NaiveTime| minimo.offset().from_local_datetime(&dia.and_time(*h)).single().unwrap();
+    for d in 0..45 {
+        let dia = minimo.date_naive() + Duration::days(d);
+        let mut slots = cfg.slots[dia.weekday().num_days_from_monday() as usize].clone();
+        slots.sort();
+        let mut cabe = vec![];
+        for s in &slots {
+            let c = local(dia, s);
+            if proximo_permitido(t, &c, cfg)? == c {
+                cabe.push(c);
+            }
+        }
+        if let Some(c) = cabe.iter().find(|c| *c >= minimo) {
+            return Ok(*c);
+        }
+        if cabe.is_empty() {
+            let inicio = (*minimo).max(local(dia, &NaiveTime::MIN));
+            let p = proximo_permitido(t, &inicio, cfg)?;
+            if p.date_naive() == dia {
+                return Ok(p);
+            }
+        }
+    }
+    proximo_permitido(t, minimo, cfg)
+}
+
+/// Paradas pra discussão da semana: cobrando, com 2+ cobranças sem resposta e sem condição. Com condição e 6+
+/// sem resposta volta também (a condição não resolveu). As mais antigas primeiro.
+pub fn paradas(state: &Estado) -> Vec<&Tarefa> {
+    let mut v: Vec<&Tarefa> = state.tarefas.iter()
+        .filter(|t| t.pendente && pausa_ate(t).is_none() && sem_resposta(t) >= if condicao(t).is_some() { 6 } else { 2 })
+        .collect();
+    v.sort_by_key(|t| pendente_desde(t).map(|d| iso(&d)).unwrap_or_default());
+    v
+}
+
+/// cobranças que saíram sem ele tocar na tarefa (`sem_resposta` via `resto`; tarefa de antes disso: as `cobrancas`)
+pub fn sem_resposta(t: &Tarefa) -> i64 {
+    t.resto.get("sem_resposta").and_then(Value::as_i64).unwrap_or(t.cobrancas)
+}
+
+fn set_sem_resposta(t: &mut Tarefa, n: i64) {
+    t.resto.insert("sem_resposta".into(), json!(n.max(0)));
+}
+
+/// ele mexeu na tarefa (adiou, remarcou, deu condição, fez): o espaçamento recomeça
+pub fn tocou(t: &mut Tarefa) {
+    set_sem_resposta(t, 0);
+}
+
+/// intervalo até a próxima cobrança: o da tarefa × fator^(sem resposta), até `max_h` (nunca menos que o da tarefa)
+pub fn espera(t: &Tarefa, cfg: &CfgCobranca) -> Duration {
+    let base = intervalo_h(t, cfg.cobrar_a_cada_h);
+    let h = (base * cfg.fator.max(1.0).powi(sem_resposta(t).clamp(0, 60) as i32)).min(cfg.max_h.max(base));
+    Duration::milliseconds((h * 3_600_000.0) as i64)
+}
+
+/// desde quando está cobrando (`pendente_desde` via `resto`; tarefa de antes disso que não repete: o `proximo`)
+pub fn pendente_desde(t: &Tarefa) -> Option<Dt> {
+    match t.resto.get("pendente_desde").and_then(Value::as_str) {
+        Some(s) => from_iso(s).ok(),
+        None if t.repetir_dias.is_none() => from_iso(&t.proximo).ok(),
+        None => None,
+    }
+}
+
+/// " (desde qui 15/10)" se está cobrando há 2 dias ou mais
+pub fn nota_desde(t: &Tarefa, now: &Dt) -> String {
+    match pendente_desde(t) {
+        Some(d) if t.pendente && now.date_naive() - d.date_naive() >= Duration::days(2) => {
+            format!(" (desde {} {})", dia_semana(&d.date_naive()).chars().take(3).collect::<String>(), d.format("%d/%m"))
+        }
+        _ => String::new(),
+    }
 }
 
 /// fim da pausa da tarefa (`pausada_ate` via `resto`), vencida ou não
@@ -199,7 +398,7 @@ pub fn set_pausa(t: &mut Tarefa, ate: Option<&Dt>, now: &Dt) {
 /// Pausa acabou (ex.: fim de semana fora, e cobrava regar planta e ligar pro médico).
 /// Repetição fixa ("todo dia") pula o que caiu na pausa e, se estava cobrando, para (aquela vez passou);
 /// o resto (uma vez só, "desde a última vez") volta a vencer/cobrar no fim da pausa, dentro das janelas.
-fn fim_da_pausa(t: &mut Tarefa, fim: &Dt, w: &(String, String)) -> R<()> {
+fn fim_da_pausa(t: &mut Tarefa, fim: &Dt, cfg: &CfgCobranca) -> R<()> {
     t.resto.remove("pausada_ate");
     let mut due = from_iso(&t.proximo)?;
     match t.repetir_dias.filter(|d| *d > 0) {
@@ -212,9 +411,10 @@ fn fim_da_pausa(t: &mut Tarefa, fim: &Dt, w: &(String, String)) -> R<()> {
                 t.pendente = false;
                 t.cobrar_em = None;
                 t.cobrancas = 0;
+                tocou(t);
             }
         }
-        _ if !t.pendente && due < *fim => t.proximo = iso(&janela_da_tarefa(t, fim, w)?),
+        _ if !t.pendente && due < *fim => t.proximo = iso(&proximo_permitido(t, fim, cfg)?),
         _ => {}
     }
     Ok(())
@@ -308,23 +508,22 @@ pub enum Aviso {
 
 /// Avança o relógio de uma tarefa. Retorna Vence / Cobra quando é hora de mandar mensagem.
 pub fn task_tick(t: &mut Tarefa, now: &Dt, cfg: &CfgCobranca) -> R<Option<Aviso>> {
-    let every = Duration::milliseconds((intervalo_h(t, cfg.cobrar_a_cada_h) * 3_600_000.0) as i64);
-    let w = &cfg.janela_cobranca;
     if let Some(fim) = pausa_ate(t) {
         if *now < fim {
             // pausada: nada vence nem cobra; cobrança marcada pra dentro da pausa vai pro fim dela
             if let Some(c) = t.cobrar_em.clone().filter(|c| t.pendente && !c.is_empty()) {
                 if from_iso(&c)? < fim {
-                    t.cobrar_em = Some(iso(&janela_da_tarefa(t, &fim, w)?));
+                    t.cobrar_em = Some(iso(&proximo_permitido(t, &fim, cfg)?));
                 }
             }
             return Ok(None);
         }
-        fim_da_pausa(t, &fim, w)?;
+        fim_da_pausa(t, &fim, cfg)?;
     }
     let mut due = from_iso(&t.proximo)?;
     if due <= *now && !(t.pendente && t.desde_feito) {
         // (repetir_dias <= 0 travaria o loop do Python pra sempre; aqui só não avança)
+        let mut nova_vez = false;
         if let Some(d) = t.repetir_dias.filter(|d| *d > 0) {
             if !t.desde_feito {
                 while due <= *now {
@@ -332,25 +531,41 @@ pub fn task_tick(t: &mut Tarefa, now: &Dt, cfg: &CfgCobranca) -> R<Option<Aviso>
                     due = due + Duration::days(d);
                 }
                 t.proximo = iso(&due);
+                // a de ontem ficou sem fazer e chegou a de hoje: é um aviso novo, não a 28ª cobrança
+                nova_vez = t.pendente;
             }
         }
-        if !t.pendente {
+        if !t.pendente || nova_vez {
             t.pendente = true;
             t.cobrancas = 0;
-            t.cobrar_em = Some(iso(&janela_da_tarefa(t, &(*now + every), w)?));
+            tocou(t);
+            t.resto.insert("pendente_desde".into(), json!(iso(now)));
+            let pode = proximo_permitido(t, now, cfg)?;
+            if condicao(t).is_some() && pode != *now {
+                // venceu fora da condição (sábado numa tarefa de dia útil): o 🔔 sai quando puder
+                t.resto.insert("vence_segurado".into(), json!(true));
+                t.cobrar_em = Some(iso(&pode));
+                return Ok(None);
+            }
+            t.cobrar_em = Some(iso(&encaixe(t, &(*now + espera(t, cfg)), cfg)?));
             return Ok(Some(Aviso::Vence));
         }
     }
     if let Some(c) = t.cobrar_em.clone().filter(|c| t.pendente && !c.is_empty()) {
         if from_iso(&c)? <= *now {
-            let dentro = janela_da_tarefa(t, now, w)?;
+            let dentro = proximo_permitido(t, now, cfg)?;
             if dentro != *now {
                 // fora da janela: espera amanhecer
                 t.cobrar_em = Some(iso(&dentro));
                 return Ok(None);
             }
+            if t.resto.remove("vence_segurado").is_some() {
+                t.cobrar_em = Some(iso(&encaixe(t, &(*now + espera(t, cfg)), cfg)?));
+                return Ok(Some(Aviso::Vence));
+            }
             t.cobrancas += 1;
-            t.cobrar_em = Some(iso(&janela_da_tarefa(t, &(*now + every), w)?));
+            set_sem_resposta(t, sem_resposta(t) + 1);
+            t.cobrar_em = Some(iso(&encaixe(t, &(*now + espera(t, cfg)), cfg)?));
             return Ok(Some(Aviso::Cobra));
         }
     }
@@ -362,8 +577,9 @@ pub fn task_tick(t: &mut Tarefa, now: &Dt, cfg: &CfgCobranca) -> R<Option<Aviso>
 pub fn adiar_por_compromisso(t: &mut Tarefa, k: Aviso, fim: &Dt, cfg: &CfgCobranca) -> R<()> {
     if k == Aviso::Cobra {
         t.cobrancas -= 1;
+        set_sem_resposta(t, sem_resposta(t) - 1);
     }
-    t.cobrar_em = Some(iso(&janela_da_tarefa(t, fim, &cfg.janela_cobranca)?));
+    t.cobrar_em = Some(iso(&proximo_permitido(t, fim, cfg)?));
     Ok(())
 }
 
@@ -374,6 +590,10 @@ pub fn task_done(state: &mut Estado, id: i64, now: &Dt) -> R<String> {
     t.pendente = false;
     t.cobrar_em = None;
     t.cobrancas = 0;
+    tocou(t);
+    for k in ["pendente_desde", "vence_segurado"] {
+        t.resto.remove(k);
+    }
     let Some(rep) = t.repetir_dias else {
         state.tarefas.remove(pos);
         return Ok("feito ✅".into());
@@ -425,8 +645,9 @@ pub fn task_snooze(t: &mut Tarefa, now: &Dt, kind: &str, cfg: &CfgCobranca) -> R
 /// Remaneja uma tarefa que já existe. Pendente: só a próxima cobrança vai pro alvo (a repetição não muda).
 /// Ainda não venceu: o vencimento vai pro alvo (e o horário, se não repete). Devolve o novo quando (ISO).
 pub fn task_move(t: &mut Tarefa, alvo: &Dt, cfg: &CfgCobranca) -> R<String> {
+    tocou(t);
     if t.pendente {
-        let c = iso(&janela_da_tarefa(t, alvo, &cfg.janela_cobranca)?);
+        let c = iso(&proximo_permitido(t, alvo, cfg)?);
         t.cobrar_em = Some(c.clone());
         return Ok(c);
     }
@@ -566,6 +787,12 @@ pub fn describe_task(t: &Tarefa) -> R<Value> {
     if let Some(fim) = pausa_ate(t).filter(|f| *f > crate::util::agora()) {
         out["pausada_ate"] = json!(fmt_when(&iso(&fim))?);
     }
+    if let Some(c) = t.resto.get("condicao") {
+        out["condicao"] = c.clone();
+    }
+    if t.pendente && sem_resposta(t) > 0 {
+        out["cobrancas_sem_resposta"] = json!(sem_resposta(t));
+    }
     Ok(out)
 }
 
@@ -578,18 +805,20 @@ pub fn tasks_overview(state: &Estado) -> R<String> {
     if !pend.is_empty() {
         lines.push("<b>Pendentes:</b>".to_string());
         for t in pend {
-            lines.push(format!("• {}{}{}{}", esc(&t.texto), if e_habito(t) { " 📊" } else { "" }, if t.cobrancas != 0 { format!(" (cobrei {}×)", t.cobrancas) } else { String::new() }, nota_pausa(t, &crate::util::agora())));
+            let now = crate::util::agora();
+            lines.push(format!("• {}{}{}{}{}", esc(&t.texto), if e_habito(t) { " 📊" } else { "" }, nota_desde(t, &now), nota_condicao(t), nota_pausa(t, &now)));
         }
     }
     if !rest.is_empty() {
         lines.push("\n<b>Próximas:</b>".into());
         for t in rest {
             lines.push(format!(
-                "• {}{} — {}{}{}",
+                "• {}{} — {}{}{}{}",
                 esc(&t.texto),
                 if e_habito(t) { " 📊" } else { "" },
                 fmt_when(&t.proximo)?,
                 t.repetir_dias.map(|r| format!(" · a cada {r}d")).unwrap_or_default(),
+                nota_condicao(t),
                 nota_pausa(t, &crate::util::agora())
             ));
         }

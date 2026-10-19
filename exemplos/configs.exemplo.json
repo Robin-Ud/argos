@@ -20,6 +20,15 @@
     "06:00",
     "23:00"
   ],
+  "cobranca_fator": 1.5,
+  "cobranca_max_h": 72,
+  "horarios_cobranca": [],
+  "antecedencia_min": 20,
+  "horario_comercial": [
+    "08:00-12:00",
+    "13:30-18:00"
+  ],
+  "dia_discussao": "sexta",
   "memoria_revisao_dias": 14,
   "hora_revisao_memoria": "10:00",
 

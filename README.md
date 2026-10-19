@@ -7,7 +7,7 @@ Assistente pessoal no Telegram, em Rust: agenda (Google), tarefas que cobram at�
 O que ele faz:
 
 - **Agenda:** conversa com a Google Agenda: *"marca dentista quinta 15h"*, *"o que tenho amanhã?"*, *"apaga o date de sexta"* (apagar sempre pede botão).
-- **Tarefas:** lista própria do bot. Cobra a cada 3 h, dentro de uma janela de horário, até você marcar feito. Durante um evento da agenda ele segura a cobrança e avisa quando o evento acaba. Cada tarefa pode ter intervalo, janelas e pausa próprios. `/tarefas` lista.
+- **Tarefas:** lista própria do bot. Cobra até você marcar feito, dentro de uma janela de horário. Cada cobrança sem resposta fica mais espaçada (3 h, 4h30, 6h45…) e cai nos horários em que você costuma aparecer, aprendidos por dia da semana (`/rotina`). Uma vez por semana, o que ficou parado vem numa lista pra você dizer quando dá pra fazer: dia útil em horário comercial, dia útil quando estiver livre, começo do mês ou amanhã. Durante um evento da agenda ele segura a cobrança e avisa quando o evento acaba. Cada tarefa pode ter intervalo, janelas, condição e pausa próprios. `/tarefas` lista.
 - **Hábitos:** tarefa criada "como hábito" (*ração do gato a cada 2 dias desde a última vez, como hábito*). Cada vez que você faz, ele grava em `dados/tracker.csv`.
 - **Memória:** guarda fatos que você conta (*"a Carla é minha chefe"*), com validade opcional (ou presa ao fim de um evento da agenda), e pede revisão a cada 14 dias. `/memoria` mostra tudo com botões.
 - **Desfazer:** toda gravação vem com botão **↩️ desfazer**: abastecimento, manutenção, tarefa feita, evento e memória. Também dá pra pedir *"desfaz isso"*.
@@ -55,6 +55,9 @@ Só `usuario` é obrigatória. O resto tem padrão:
 | `usuario` | `{"nome", "ela", "sobre", "cidade", "assistente"}`: quem usa (vai pro prompt). `sobre`, `cidade` e `assistente` (padrão "o Argos") são opcionais |
 | `fuso` | padrão `America/Sao_Paulo`. Os fusos do Brasil e Lisboa vão no binário; pra outro, acrescente em `.cargo/config.toml` e recompile |
 | `cobrar_a_cada_h`, `janela_cobranca` | cobrança padrão das tarefas (cada tarefa pode ter as suas) |
+| `cobranca_fator`, `cobranca_max_h` | cada cobrança sem resposta multiplica o intervalo (padrão 1,5, até 72 h) |
+| `horarios_cobranca`, `antecedencia_min` | horários fixos de cobrança (`["07:30", "21:30"]`), somados aos aprendidos da sua rotina; a cobrança sai `antecedencia_min` (20) antes do costume |
+| `horario_comercial`, `dia_discussao` | janelas da condição "dia útil, horário comercial"; dia da lista das tarefas paradas (padrão `"sexta"`, `""` desliga) |
 | `clima_lat`, `clima_lon`, `chuva_limiar` | liga o aviso de chuva; `chuva_aviso: false` deixa só a consulta |
 | `alerta_geocode` (código IBGE), `alerta_nome`, `alerta_lat`, `alerta_lon` | liga o alerta de temporal |
 | `postos_municipio`, `postos_estado` | liga o `/postos` (pesquisa semanal da ANP, baixada por `argos --anp` num processo à parte) |

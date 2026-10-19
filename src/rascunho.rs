@@ -184,7 +184,7 @@ pub fn juntar(a: &Leitura, b: &Leitura) -> Option<Leitura> {
             (p, q) => Ok(p.clone().or_else(|| q.clone())),
         }
     }
-    let obs = [a.observacao.trim(), b.observacao.trim()].iter().filter(|o| !o.is_empty()).cloned().collect::<Vec<_>>().join(" · ");
+    // a nota de cada foto fala do que faltava nela ("sem odômetro", "valores nulos"): junto, ficou velha (18/10)
     Some(Leitura {
         total_reais: num(a.total_reais, b.total_reais).ok()?,
         litros: num(a.litros, b.litros).ok()?,
@@ -192,7 +192,7 @@ pub fn juntar(a: &Leitura, b: &Leitura) -> Option<Leitura> {
         combustivel: txt(&a.combustivel, &b.combustivel).ok()?,
         odometro_km: num(a.odometro_km, b.odometro_km).ok()?,
         veiculo: txt(&a.veiculo, &b.veiculo).ok()?,
-        observacao: obs,
+        observacao: String::new(),
         cnpj_posto: txt(&a.cnpj_posto, &b.cnpj_posto).ok()?,
     })
 }
@@ -319,6 +319,39 @@ fn fields() -> &'static [(&'static str, Regex); 4] {
     })
 }
 
+/// Depois do ✏️ Corrigir, número sem nome de campo ("55.41 n . 43", 18/10): vai pro campo cujo valor atual está
+/// a até 5% dele (o mais perto); km perto (até `km_max`) do odômetro do rascunho ou do último abastecimento →
+/// odômetro. Número que não bate com nada é ignorado. Devolve os campos mudados.
+pub fn numero_solto(d: &mut Rascunho, text: &str, last_odo: Option<f64>, km_max: f64) -> Vec<String> {
+    static NUM: OnceLock<Regex> = OnceLock::new();
+    let num = NUM.get_or_init(|| Regex::new(r"\d+(?:[.,]\d+)?").expect("regex válida"));
+    let mut changed: Vec<String> = vec![];
+    for m in num.find_iter(text) {
+        let Ok(v) = m.as_str().replace(',', ".").parse::<f64>() else { continue };
+        let perto = |atual: Option<f64>| atual.filter(|a| *a > 0.0).map(|a| (v - a).abs() / a).filter(|r| *r <= 0.05);
+        let mut alvo: Vec<(&str, f64)> = [("total", perto(d.total)), ("litros", perto(d.litros)), ("preco", perto(d.preco))]
+            .into_iter().filter_map(|(c, r)| r.map(|r| (c, r))).collect();
+        let base_km = d.odometro.or(last_odo);
+        if base_km.is_some_and(|o| v >= 100.0 && (v - o).abs() <= km_max) {
+            alvo.push(("odometro", 1.0));
+        }
+        alvo.retain(|(c, _)| !changed.iter().any(|x| x == c));
+        alvo.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let Some((campo, _)) = alvo.first() else { continue };
+        match *campo {
+            "total" => d.total = Some(v),
+            "litros" => d.litros = Some(v),
+            "preco" => d.preco = Some(v),
+            _ => d.odometro = Some(v),
+        }
+        changed.push(campo.to_string());
+    }
+    if !changed.is_empty() {
+        d.obs.clear();
+    }
+    changed
+}
+
 pub fn parse_number(raw: &str, field: &str) -> R<f64> {
     static MILHAR: OnceLock<Regex> = OnceLock::new();
     let milhar = MILHAR.get_or_init(|| Regex::new(r"^\d{1,3}(\.\d{3})+$").unwrap());
@@ -363,6 +396,10 @@ pub fn apply_correction(d: &mut Rascunho, text: &str, fuel_types: &[String], vei
             changed.push("veiculo".into());
             break;
         }
+    }
+    if !changed.is_empty() {
+        // a nota 💬 da leitura ("valores lidos com incerteza") não vale mais pro que ele corrigiu
+        d.obs.clear();
     }
     Ok(changed)
 }

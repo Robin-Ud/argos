@@ -14,6 +14,7 @@ pub mod postos;
 pub mod rascunho;
 pub mod recados;
 pub mod rede;
+pub mod rotina;
 pub mod tarefas;
 pub mod temporal;
 pub mod util;

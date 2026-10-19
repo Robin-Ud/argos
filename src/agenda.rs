@@ -285,18 +285,20 @@ comprar algo, levantar do sofá daqui 3 min).",
                     "contar_desde_feito": {"type": "boolean", "description": "true = a próxima conta a partir de quando {ele} marcar feito ('a cada 7 dias desde a última vez'); false = agenda fixa ('toda sexta')"},
                     "janelas": {"type": "array", "items": {"type": "string"}, "description": "só cobrar dentro destas janelas 'HH:MM-HH:MM' (ex.: horário útil da memória, se {ele} pedir 'só em horário útil'); [] = padrão"},
                     "habito": {"type": "boolean", "description": "true = hábito: cada vez que {ele} fizer vira uma linha no tracker (histórico pra ajustar a frequência) e concluir não pede confirmação. Só se {ele} pedir pra acompanhar/registrar ou chamar de hábito"},
-                    "cobrar_a_cada_h": nullable_desc("number", "horas entre uma cobrança e outra até {ele} marcar feito ('me cobra 1x por dia' = 24); null = padrão")})),
+                    "cobrar_a_cada_h": nullable_desc("number", "horas entre uma cobrança e outra até {ele} marcar feito ('me cobra 1x por dia' = 24); null = padrão"),
+                    "condicao": {"type": "string", "enum": ["nenhuma", "comercial", "livre", "inicio_mes"], "description": "quando dá pra fazer: 'comercial' = dia útil em horário comercial (resolver com empresa, banco, órgão); 'livre' = dia útil, quando {ele} estiver livre na agenda; 'inicio_mes' = só do dia 1 ao 10 (depende do dinheiro do mês); 'nenhuma' = qualquer dia (padrão)"}})),
         tool("listar_tarefas", "Lista as tarefas do bot: pendentes (já venceram) e próximas.", json!({})),
         tool("concluir_tarefa", "Marca uma tarefa como feita ({ele} disse que fez).", json!({"id": {"type": "integer"}})),
         tool("apagar_tarefa", "Remove uma tarefa da lista de vez (não é concluir).", json!({"id": {"type": "integer"}})),
         tool_opcional("adiar_tarefa",
              "Muda o horário de uma tarefa que já existe (adiar, remanejar, 'me lembra disso às 18'). \
 Pendente: a próxima cobrança vai pro horário novo e a repetição não muda. Ainda não venceu: o vencimento vai pro horário novo. \
-Também muda janelas e intervalo de cobrança de uma tarefa que já existe.",
+Também muda janelas, intervalo de cobrança e condição de uma tarefa que já existe.",
              json!({"id": {"type": "integer"},
                     "quando": {"type": "string", "description": "'AAAA-MM-DDTHH:MM' (horário de {fuso}); só 'AAAA-MM-DD' mantém o horário da tarefa; omitido = não mexe no horário (só janelas/intervalo)"},
                     "janelas": {"type": "array", "items": {"type": "string"}, "description": "só cobrar dentro destas janelas 'HH:MM-HH:MM' (ex.: horário útil da memória, se {ele} pedir 'só em horário útil'); [] = mantém as que ela já tem"},
-                    "cobrar_a_cada_h": {"type": "number", "description": "novo intervalo entre cobranças, em horas; omitido = mantém"}}),
+                    "cobrar_a_cada_h": {"type": "number", "description": "novo intervalo entre cobranças, em horas; omitido = mantém"},
+                    "condicao": {"type": "string", "enum": ["nenhuma", "comercial", "livre", "inicio_mes"], "description": "quando dá pra fazer: 'comercial' = dia útil em horário comercial (resolver com empresa, banco, órgão); 'livre' = dia útil, quando {ele} estiver livre na agenda; 'inicio_mes' = só do dia 1 ao 10 (depende do dinheiro do mês); 'nenhuma' = qualquer dia (padrão); omitido = mantém"}}),
              &["id"]),
         tool("pausar_tarefas",
              "Pausa tarefas até uma data (viagem, folga, 'não me cobra nada no fim de semana'): nada vence nem cobra até lá. \
@@ -342,6 +344,7 @@ const AGENDA_SYSTEM: &str = concat!(
     "- Responda em 1 a 3 linhas. Chat, não e-mail. Português do Brasil, sem markdown.\n",
     "- Responda só o que foi perguntado. Sem sugestões não pedidas, sem explicar limitações, sem repetir o pedido, sem 'posso ajudar em mais algo'.\n",
     "- Não achou? Diga em uma linha e faça no máximo uma pergunta.\n",
+    "- Tudo o que você gravar sai num recibo ✓ que o bot põe embaixo da sua resposta. Não repita o recibo: com ação, escreva só o que o recibo não diz (o que você assumiu, um aviso, uma pergunta) ou nada.\n",
     "- Lista de agenda: copie as `linhas_prontas` que listar_eventos devolve, TODAS, sem cortar nem reescrever (pode tirar o dia da frente se a pergunta for de um dia só). Descrição só se {ele} pedir.\n",
     "\n",
     "AGENDA:\n",
@@ -350,7 +353,6 @@ const AGENDA_SYSTEM: &str = concat!(
     "- Procurando um evento por nome, use também os apelidos/termos da memória (ex.: apelido de uma pessoa).\n",
     "- Horário ambíguo ('às 8'): assuma o mais provável e diga o que assumiu.\n",
     "- 'Esse horário', 'lá', 'nesse dia' sem o horário/dia aparecer na conversa (o histórico zera quando o bot reinicia): pergunte qual, nunca use a hora atual no lugar.\n",
-    "- Depois de criar/editar: uma linha com título, dia da semana, data e horário.\n",
     "- Eventos 'Sono' são a rotina de dormir: ignore em resumos, a menos que {ele} pergunte.\n",
     "- Apagar passa pelo botão de confirmação: diga que está esperando {ele} confirmar.\n",
     "- Horário livre e horário útil são coisas diferentes, os dois pelo horarios_livres: 'horário útil' (ou 'quando dá pra marcar' algo de trabalho/estudo) = janelas de horário útil da memória; 'horário livre' sem 'útil' = janela 00:00-23:59 (o Sono conta como ocupado). Responda com a primeira das linhas_prontas; nunca dê horário útil fora das janelas.\n",
@@ -370,6 +372,8 @@ const AGENDA_SYSTEM: &str = concat!(
     "- habito = true só se {ele} pedir pra acompanhar/registrar quando fizer ou chamar de hábito ('ração do gato a cada 2 dias desde a última vez, como hábito'); senão false.\n",
     "- Mudar o horário de uma tarefa que já existe ('me lembra às 18' sem dizer o quê, 'me cobra disso mais tarde', 'a cobrança de X às 18', adiar, remanejar): adiar_tarefa com o id das pendentes que vêm na mensagem (ou do listar_tarefas). Nunca crie tarefa nova pra isso.\n",
     "- 'Aumenta o intervalo', 'me cobra menos', 'cobra 1x por dia' de uma tarefa: adiar_tarefa com cobrar_a_cada_h (sem número: o dobro do atual; o padrão está no fim deste prompt e o próprio da tarefa vem nas pendentes). Pedido que junta horário e intervalo ('academia daqui 2 dias, aumenta o intervalo') é UMA chamada de adiar_tarefa com os dois.\n",
+    "- Tarefa que só dá pra resolver em certos dias: condicao (criar_tarefa/adiar_tarefa). 'Só em dia útil', 'ligar pro banco', 'horário comercial' → comercial; 'quando eu tiver livre num dia de semana' → livre; 'começo do mês', 'quando cair o salário/dinheiro' → inicio_mes. 'Pode cobrar qualquer dia' → nenhuma.\n",
+    "- Cobrança sem resposta espaça sozinha (cada uma mais longe da outra, nos horários em que {ele} costuma aparecer) e o que fica parado vai, uma vez por semana, pra uma lista com botões. 'Para de me encher', 'me cobra menos' sem tarefa certa → diga que já é assim; com tarefa, adiar_tarefa com cobrar_a_cada_h ou condicao.\n",
     "- Viagem, folga, 'pausa as tarefas até X', 'não me cobra nada no fim de semana': pausar_tarefas (ids [] = todas, ou só as que {ele} citar; 'ate' = quando {ele} volta). 'Pode voltar a cobrar' → ate null. Não apague nem adie uma por uma pra isso.\n",
     "\n",
     "MANUTENÇÃO: os registros dos veículos estão no ver_manutencao — use pra perguntas de atraso, última vez ou o que vence (nunca diga que não tem acesso); copie os números e o nome de cada item como vêm, não recalcule nem renomeie ('Nível do óleo' é conferir o nível, não trocar o óleo). O bot avisa às 6h o que venceu. Se {ele} contar que fez, registrar_manutencao com as chaves exatas da lista no fim (não bateu: pergunte).\n",
@@ -815,7 +819,8 @@ Só se for mesmo outra tarefa, chame criar_tarefa de novo com o mesmo texto.",
                 let intervalo = arg_intervalo(args)?;
                 // só existe com parceiro (dir)
                 let privada = args.get("privado").and_then(Value::as_bool) == Some(true);
-                if !janelas.is_empty() || habito || intervalo.is_some() || privada {
+                let condicao = args.get("condicao").and_then(Value::as_str).filter(|c| *c != "nenhuma");
+                if !janelas.is_empty() || habito || intervalo.is_some() || privada || condicao.is_some() {
                     let pos = self.state.tarefas.iter().position(|x| x.id == t.id).ok_or_else(|| Erro::Valor("tarefa sumiu".into()))?;
                     crate::tarefas::set_janelas(&mut self.state.tarefas[pos], &janelas)?;
                     crate::tarefas::set_intervalo(&mut self.state.tarefas[pos], intervalo)?;
@@ -823,6 +828,9 @@ Só se for mesmo outra tarefa, chame criar_tarefa de novo com o mesmo texto.",
                         self.state.tarefas[pos].resto.insert("habito".into(), Value::Bool(true));
                     }
                     crate::tarefas::set_privado(&mut self.state.tarefas[pos].resto, privada);
+                    if let Some(c) = condicao {
+                        crate::tarefas::set_condicao(&mut self.state.tarefas[pos], c)?;
+                    }
                     t = self.state.tarefas[pos].clone();
                 }
                 save_state(&self.state, &self.state_path)?;
@@ -832,7 +840,7 @@ Só se for mesmo outra tarefa, chame criar_tarefa de novo com o mesmo texto.",
                     t.texto,
                     fmt_when(&t.proximo)?,
                     t.repetir_dias.map(|r| format!(" · a cada {r}d")).unwrap_or_default(),
-                    nota_janelas(&t)
+                    nota_janelas(&t) + crate::tarefas::nota_condicao(&t)
                 ) + if habito { " · 📊 hábito (vai pro tracker)" } else { "" } + if privada { " 🔒" } else { "" });
                 println!("tarefa: criada {}", serde_json::to_string(&t).unwrap_or_default());
                 Ok(dumps(&json!({"ok": true, "tarefa": describe_task(&t)?})))
@@ -888,27 +896,32 @@ Só se for mesmo outra tarefa, chame criar_tarefa de novo com o mesmo texto.",
                 let janelas = arg_janelas(args)?;
                 let intervalo = arg_intervalo(args)?;
                 let privada = args.get("privado").and_then(Value::as_bool);
-                if alvo.is_none() && janelas.is_empty() && intervalo.is_none() && privada.is_none() {
-                    return Err(Erro::Valor("nada pra mudar: passe quando, janelas, cobrar_a_cada_h ou privado".into()));
+                let condicao = args.get("condicao").and_then(Value::as_str);
+                if alvo.is_none() && janelas.is_empty() && intervalo.is_none() && privada.is_none() && condicao.is_none() {
+                    return Err(Erro::Valor("nada pra mudar: passe quando, janelas, cobrar_a_cada_h, condicao ou privado".into()));
                 }
                 self.agenda.undo_ops.push(crate::desfazer::op_tarefa_antes(&self.state.tarefas[pos]));
+                crate::tarefas::tocou(&mut self.state.tarefas[pos]);
+                if let Some(c) = condicao {
+                    crate::tarefas::set_condicao(&mut self.state.tarefas[pos], c)?;
+                }
                 crate::tarefas::set_janelas(&mut self.state.tarefas[pos], &janelas)?;
                 crate::tarefas::set_intervalo(&mut self.state.tarefas[pos], intervalo)?;
                 if let Some(sim) = privada {
                     crate::tarefas::set_privado(&mut self.state.tarefas[pos].resto, sim);
                 }
-                let cfg = self.config.cobranca();
+                let cfg = self.cobranca();
                 let t = &mut self.state.tarefas[pos];
                 let novo = match &alvo {
                     Some(a) => Some(task_move(t, a, &cfg)?),
                     None => None,
                 };
                 let texto = t.texto.clone();
-                let nota = nota_janelas(t) + &nota_intervalo(t);
+                let nota = nota_janelas(t) + &nota_intervalo(t) + crate::tarefas::nota_condicao(t);
                 save_state(&self.state, &self.state_path)?;
                 let acao = match &novo {
                     Some(n) => format!("⏰ tarefa adiada: {texto} → {}{nota}", fmt_when(n)?),
-                    None if privada.is_some() && janelas.is_empty() && intervalo.is_none() =>
+                    None if privada.is_some() && janelas.is_empty() && intervalo.is_none() && condicao.is_none() =>
                         format!("{} tarefa {}: {texto}", if privada == Some(true) { "🔒" } else { "🔓" }, if privada == Some(true) { "privada" } else { "visível" }),
                     None => format!("⏰ tarefa ajustada: {texto}{nota}"),
                 };
@@ -1104,7 +1117,7 @@ Só grava se ele tocar em Gravar; se ele disser a km certa, chame de novo com od
         self.agenda.last_at = Some(Instant::now());
         let now = crate::util::agora();
         // pendentes vão na mensagem (não no system, que fica em cache): "me lembra às 18" já sabe de qual se trata
-        let pendentes: Vec<String> = self.state.tarefas.iter().filter(|t| t.pendente).map(|t| format!("#{} {}{}{}", t.id, t.texto, nota_intervalo(t), crate::tarefas::nota_pausa(t, &now))).collect();
+        let pendentes: Vec<String> = self.state.tarefas.iter().filter(|t| t.pendente).map(|t| format!("#{} {}{}{}{}", t.id, t.texto, nota_intervalo(t), crate::tarefas::nota_condicao(t), crate::tarefas::nota_pausa(t, &now))).collect();
         let mut pendentes = if pendentes.is_empty() { String::new() } else { format!("\n[tarefas pendentes (cobrando): {}]", pendentes.join("; ")) };
         if let Some(f) = self.agenda.foco_hora.take() {
             pendentes += &format!("\n[respondendo ao \"pra quando?\" do 🕒 da tarefa {f}]");
