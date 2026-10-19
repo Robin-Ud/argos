@@ -33,8 +33,11 @@ pub struct Config {
     pub esforco_leitura: String,
     pub esforco_agenda: String,
     pub agenda_reset_min: f64,
-    pub hora_manutencao: String,
+    /// bom-dia (mudo): agenda, chuva, tarefas, manutenção e memória do dia numa mensagem só
+    pub hora_bom_dia: String,
+    /// item vencido que ele não marca volta depois disto × `cobranca_fator` a cada aviso, até `manutencao_max_dias`
     pub manutencao_repetir_dias: f64,
+    pub manutencao_max_dias: f64,
     pub hora_padrao_tarefa: String,
     pub cobrar_a_cada_h: f64,
     pub janela_cobranca: (String, String),
@@ -50,7 +53,6 @@ pub struct Config {
     /// dia da semana da discussão das tarefas paradas ("sexta"; "" desliga)
     pub dia_discussao: String,
     pub memoria_revisao_dias: f64,
-    pub hora_revisao_memoria: String,
     /// git pull/push no motor_dir (só se ele for um repositório)
     pub git_sync: bool,
     pub espera_fotos_s: f64,
@@ -61,7 +63,6 @@ pub struct Config {
     pub clima_lon: Option<f64>,
     pub chuva_limiar: f64,
     pub hora_chuva_noite: String,
-    pub hora_chuva_manha: String,
     /// postos (postos.rs): sem município fica desligado; com ele, `postos_estado` é obrigatório
     pub postos_municipio: Option<String>,
     pub postos_estado: String,
@@ -91,9 +92,9 @@ pub struct Config {
     pub prompt_extra: Option<String>,
     /// escopos a mais no `--google-login` (ex. drive.file pra quem usa o Drive com o mesmo token)
     pub google_escopos_extra: Vec<String>,
-    /// aviso automático de chuva (21h/6h30); false deixa só o /chuva e a previsao_chuva
+    /// aviso automático de chuva (21h e no bom-dia); false deixa só o /chuva e a previsao_chuva
     pub chuva_aviso: bool,
-    /// aviso das 06:00 só destes veículos (pedaço do nome, sem acento); sem a chave, todos
+    /// aviso de manutenção só destes veículos (pedaço do nome, sem acento); sem a chave, todos
     pub manutencao_veiculos: Option<Vec<String>>,
     /// postos.json de outra instância (ranking, coordenadas e apelidos em comum); com ele, esta não baixa a ANP
     pub postos_json: Option<String>,
@@ -116,8 +117,9 @@ impl Default for Config {
             esforco_leitura: s("medium"),
             esforco_agenda: s("medium"),
             agenda_reset_min: 30.0,
-            hora_manutencao: s("06:00"),
+            hora_bom_dia: s("06:00"),
             manutencao_repetir_dias: 3.0,
+            manutencao_max_dias: 3.0,
             hora_padrao_tarefa: s("09:00"),
             cobrar_a_cada_h: 3.0,
             janela_cobranca: (s("06:00"), s("23:00")),
@@ -128,7 +130,6 @@ impl Default for Config {
             horario_comercial: vec![s("08:00-12:00"), s("13:30-18:00")],
             dia_discussao: s("sexta"),
             memoria_revisao_dias: 14.0,
-            hora_revisao_memoria: s("10:00"),
             git_sync: false,
             espera_fotos_s: 12.0,
             tolerancia_total: 0.03,
@@ -137,7 +138,6 @@ impl Default for Config {
             clima_lon: None,
             chuva_limiar: 70.0,
             hora_chuva_noite: s("21:00"),
-            hora_chuva_manha: s("06:30"),
             postos_municipio: None,
             postos_estado: String::new(),
             postos_raio_km: 5.0,
@@ -207,6 +207,11 @@ impl Config {
         }
         for h in &self.horarios_cobranca {
             chrono::NaiveTime::parse_from_str(h, "%H:%M").map_err(|_| Erro::Msg(format!("configs.json: horarios_cobranca: '{h}' (use 'HH:MM')")))?;
+        }
+        chrono::NaiveTime::parse_from_str(&self.hora_bom_dia, "%H:%M")
+            .map_err(|_| Erro::Msg(format!("configs.json: hora_bom_dia {:?} (use 'HH:MM')", self.hora_bom_dia)))?;
+        if self.manutencao_max_dias < 1.0 {
+            return Err(Erro::Msg("configs.json: manutencao_max_dias tem que ser 1 ou mais".into()));
         }
         if !self.dia_discussao.is_empty() && !crate::util::WEEKDAYS.contains(&self.dia_discussao.as_str()) {
             return Err(Erro::Msg(format!("configs.json: dia_discussao {:?} (use {})", self.dia_discussao, crate::util::WEEKDAYS.join(", "))));
@@ -448,6 +453,38 @@ impl Bot {
         self.tg.send(self.chat_id, text, kb, true)
     }
 
+    /// eventos de `dias` dias a partir de `inicio`, sem o Sono, uma linha "• …" por evento (dia só: sem a data na frente)
+    fn linhas_agenda(&mut self, inicio: chrono::NaiveDate, dias: i64) -> R<Vec<String>> {
+        let start = crate::util::no_fuso(inicio.and_hms_opt(0, 0, 0).unwrap());
+        let end = crate::util::no_fuso((inicio + chrono::Duration::days(dias)).and_hms_opt(0, 0, 0).unwrap());
+        let events = self.google()?.list_events(&start, &end, None)?;
+        let dia = inicio.format("%d/%m").to_string();
+        let mut lines = vec![];
+        for e in events.iter().filter(|e| crate::agenda::fold(&crate::util::str_num(e.get("summary").unwrap_or(&Value::Null))) != "sono") {
+            let l = crate::agenda::agenda_line(e)?;
+            // dia só: tira o "sex 02/10 · " da frente quando é o próprio dia
+            let l = match l.split_once(" · ") {
+                Some((pre, rest)) if dias == 1 && pre.ends_with(&dia) => rest.to_string(),
+                _ => l,
+            };
+            lines.push(format!("• {}", esc(&l)));
+        }
+        Ok(lines)
+    }
+
+    /// hora de tarefa nova que veio só com a data: o 1º horário de cobrança daquele dia da semana que ainda não
+    /// passou (o "pra amanhã" chega antes de ele sair de casa); sem nenhum, `hora_padrao_tarefa`
+    pub fn hora_padrao_em(&self, quando: &str) -> String {
+        use chrono::Datelike;
+        let Some(dia) = crate::util::so_data(quando).then(|| chrono::NaiveDate::parse_from_str(quando, "%Y-%m-%d").ok()).flatten() else {
+            return self.config.hora_padrao_tarefa.clone();
+        };
+        let slots = &self.cobranca().slots[dia.weekday().num_days_from_monday() as usize];
+        let agora = agora().naive_local();
+        slots.iter().find(|h| dia.and_time(**h) > agora).or(slots.first())
+            .map(|h| h.format("%H:%M").to_string()).unwrap_or_else(|| self.config.hora_padrao_tarefa.clone())
+    }
+
     /// a cobrança com os horários fixos do config e os de costume aprendidos
     pub fn cobranca(&self) -> CfgCobranca {
         let mut c = self.config.cobranca();
@@ -576,7 +613,7 @@ impl Bot {
         if veiculos.is_empty() {
             return t + "\n⛽ Abastecimento e manutenção de veículo: desligados (sem veículo cadastrado).";
         }
-        t += &format!("🔧 Manutenção vencida eu aviso sozinho às {}. Fez alguma? <i>calibrei os pneus</i>.\n\n", self.config.hora_manutencao.trim_start_matches('0').replace(":00", "h"));
+        t += &format!("🔧 Manutenção vencida vem no bom-dia das {}. Fez alguma? <i>calibrei os pneus</i>.\n\n", self.config.hora_bom_dia.trim_start_matches('0').replace(":00", "h"));
         t += "⛽ <b>Abastecimento:</b> manda a foto da <b>bomba</b> e a do <b>odômetro</b> (juntas ou em sequência) que eu leio e registro na planilha do veículo.\n\n";
         t + &crate::rascunho::texto_corrigir(&veiculos, "Pra corrigir uma leitura")
     }
@@ -1057,7 +1094,19 @@ impl Bot {
             Ok(n) => changed = n > 0,
             Err(e) => println!("erro nos recados: {e}"),
         }
+        if !prune_expired(&mut self.state, &now).is_empty() {
+            changed = true;
+        }
         let cfg = self.cobranca();
+        let hoje = now.format("%Y-%m-%d").to_string();
+        if now.format("%H:%M").to_string() >= self.config.hora_bom_dia && self.state.bom_dia_checado.as_deref() != Some(hoje.as_str()) {
+            // antes das tarefas: o que cobraria agora vai nele, não numa mensagem com som logo depois
+            self.state.bom_dia_checado = Some(hoje.clone());
+            if let Err(e) = self.send_bom_dia(&now, &cfg) {
+                println!("erro no bom-dia: {e}");
+            }
+            changed = true;
+        }
         let mut ocupado = None; // agenda consultada no máximo uma vez por volta, só se alguma tarefa for avisar
         let mut avisos = Vec::new();
         for i in 0..self.state.tarefas.len() {
@@ -1071,24 +1120,6 @@ impl Bot {
         }
         if let Err(e) = self.send_task_alerts(&avisos) {
             println!("erro no aviso de tarefas: {e}");
-        }
-        let hoje = now.format("%Y-%m-%d").to_string();
-        if self.config.tem_veiculos && now.format("%H:%M").to_string() >= self.config.hora_manutencao && self.state.manutencao_checada.as_deref() != Some(hoje.as_str()) {
-            self.state.manutencao_checada = Some(hoje.clone());
-            if let Err(e) = self.check_maintenance_alerts(&now, false) {
-                println!("erro no aviso de manutenção: {e}");
-            }
-            changed = true;
-        }
-        if !prune_expired(&mut self.state, &now).is_empty() {
-            changed = true;
-        }
-        if now.format("%H:%M").to_string() >= self.config.hora_revisao_memoria && self.state.memoria_checada.as_deref() != Some(hoje.as_str()) {
-            self.state.memoria_checada = Some(hoje.clone());
-            if let Err(e) = self.send_memory_review(&now, false) {
-                println!("erro na revisão da memória: {e}");
-            }
-            changed = true;
         }
         if self.discussao_tick(&now) {
             changed = true;
@@ -1138,24 +1169,8 @@ impl Bot {
                         [botao("🕒 outra hora", &format!("tar:qq:{}", t.id))]]))
             }
             _ => {
-                let ts: Vec<(&Tarefa, Aviso)> = avisos.iter().map(|&(i, k)| (&self.state.tarefas[i], k)).collect();
-                let now = agora();
-                let lines = ts.iter().map(|(t, k)| match k {
-                    Aviso::Vence => format!("• {} 🔔", esc(&t.texto)),
-                    Aviso::Cobra => match crate::tarefas::nota_desde(t, &now) {
-                        d if d.is_empty() => format!("• {}", esc(&t.texto)),
-                        d => format!("• {} <i>{}</i>", esc(&t.texto), d.trim_start()),
-                    },
-                }).collect::<Vec<_>>().join("\n");
-                let mut kb: Vec<Value> = ts.iter().map(|(t, _)| {
-                    json!([botao(&format!("✅ {}", rotulo_curto(&t.texto)), &format!("tar:ok:{}", t.id)), botao("🕒", &format!("tar:qq:{}", t.id))])
-                }).collect();
-                let ids = ts.iter().map(|(t, _)| t.id.to_string()).collect::<Vec<_>>().join(",");
-                // callback_data passa de 64 bytes → o Telegram recusa a mensagem inteira
-                if ids.len() <= 64 - "tar:am:".len() {
-                    kb.push(json!([botao("⏰ 1h todas", &format!("tar:1h:{ids}")), botao("⏰ amanhã todas", &format!("tar:am:{ids}"))]));
-                }
-                (format!("⏰ <b>{} tarefas cobrando</b>:\n{lines}\n\nToca no que você já fez:", ts.len()), Value::Array(kb))
+                let (lines, kb) = self.lista_cobranca(avisos, &agora());
+                (format!("⏰ <b>{} tarefas cobrando</b>:\n{lines}\n\nToca no que você já fez:", avisos.len()), Value::Array(kb))
             }
         };
         let ids: Vec<i64> = avisos.iter().map(|&(i, _)| self.state.tarefas[i].id).collect();
@@ -1171,18 +1186,111 @@ impl Bot {
         Ok(())
     }
 
-    /// Uma vez por semana (`dia_discussao`, no 1º horário de costume do dia; sem ele, 9h): as tarefas paradas
+    /// as linhas e os botões de várias tarefas cobrando (um ✅ e um 🕒 por tarefa, o adiar de todas embaixo)
+    fn lista_cobranca(&self, avisos: &[(usize, Aviso)], now: &crate::util::Dt) -> (String, Vec<Value>) {
+        let ts: Vec<(&Tarefa, Aviso)> = avisos.iter().map(|&(i, k)| (&self.state.tarefas[i], k)).collect();
+        let lines = ts.iter().map(|(t, k)| match k {
+            Aviso::Vence => format!("• {} 🔔", esc(&t.texto)),
+            Aviso::Cobra => match crate::tarefas::nota_desde(t, now) {
+                d if d.is_empty() => format!("• {}", esc(&t.texto)),
+                d => format!("• {} <i>{}</i>", esc(&t.texto), d.trim_start()),
+            },
+        }).collect::<Vec<_>>().join("\n");
+        let mut kb: Vec<Value> = ts.iter().map(|(t, _)| {
+            json!([botao(&format!("✅ {}", rotulo_curto(&t.texto)), &format!("tar:ok:{}", t.id)), botao("🕒", &format!("tar:qq:{}", t.id))])
+        }).collect();
+        let ids = ts.iter().map(|(t, _)| t.id.to_string()).collect::<Vec<_>>().join(",");
+        // callback_data passa de 64 bytes → o Telegram recusa a mensagem inteira
+        if ts.len() > 1 && ids.len() <= 64 - "tar:am:".len() {
+            kb.push(json!([botao("⏰ 1h todas", &format!("tar:1h:{ids}")), botao("⏰ amanhã todas", &format!("tar:am:{ids}"))]));
+        }
+        (lines, kb)
+    }
+
+    /// Bom-dia (`hora_bom_dia`, uma vez por dia, mudo: ele lê quando acordar): agenda de hoje, chuva de hoje,
+    /// as tarefas que cobrariam agora (contam como a cobrança; o Sono não segura), o resto do dia,
+    /// a manutenção na vez e a revisão da memória — numa mensagem só. Nada pra dizer = não manda
+    pub fn send_bom_dia(&mut self, now: &crate::util::Dt, cfg: &CfgCobranca) -> R<bool> {
+        let mut partes: Vec<String> = vec![];
+        let mut kb: Vec<Value> = vec![];
+        let hoje = now.date_naive();
+        if self.config.tem_google {
+            match self.linhas_agenda(hoje, 1) {
+                Ok(ls) if !ls.is_empty() => partes.push(format!("📅 <b>Agenda</b>\n{}", ls.join("\n"))),
+                Ok(_) => {}
+                Err(e) => println!("bom-dia: agenda: {e}"),
+            }
+        }
+        if let (Some(lat), Some(lon), true) = (self.config.clima_lat, self.config.clima_lon, self.config.chuva_aviso) {
+            match self.clima.previsao(lat, lon) {
+                Ok(horas) => {
+                    let p = crate::clima::periodos_chuva(&horas, hoje, chrono::Timelike::hour(now), self.config.chuva_limiar);
+                    if !p.is_empty() {
+                        partes.push(crate::clima::texto_chuva("hoje", &p));
+                    }
+                }
+                Err(e) => println!("bom-dia: previsão: {e}"),
+            }
+        }
+        let mut avisos = vec![];
+        for i in 0..self.state.tarefas.len() {
+            match task_tick(&mut self.state.tarefas[i], now, cfg) {
+                Ok(Some(k)) => avisos.push((i, k)),
+                Ok(None) => {}
+                Err(e) => println!("erro na tarefa {}: {e}", self.state.tarefas[i].texto),
+            }
+        }
+        if !avisos.is_empty() {
+            let (lines, b) = self.lista_cobranca(&avisos, now);
+            partes.push(format!("⏰ <b>Cobrando</b>\n{lines}"));
+            kb.extend(b);
+        }
+        let cobrando: Vec<i64> = avisos.iter().map(|&(i, _)| self.state.tarefas[i].id).collect();
+        let mais_tarde = crate::tarefas::mais_tarde_hoje(&self.state, now, &cobrando);
+        if !mais_tarde.is_empty() {
+            partes.push(format!("🕒 <b>Mais tarde</b>\n{}", mais_tarde.iter().map(|(h, t)| format!("• {h} {}", esc(t))).collect::<Vec<_>>().join("\n")));
+        }
+        if self.config.tem_veiculos {
+            match self.manutencao_do_dia(now) {
+                Ok(secoes) => {
+                    for (t, b) in secoes {
+                        partes.push(t);
+                        kb.extend(b);
+                    }
+                }
+                Err(e) => println!("bom-dia: manutenção: {e}"),
+            }
+        }
+        match self.revisao_memoria(now, false) {
+            Ok(Some((t, b))) => {
+                partes.push(t);
+                kb.extend(b);
+            }
+            Ok(None) => {}
+            Err(e) => println!("bom-dia: memória: {e}"),
+        }
+        if partes.is_empty() {
+            return Ok(false);
+        }
+        let texto = format!("☀️ <b>Bom dia</b> — {} {}\n\n{}", crate::util::dia_semana(&hoje).chars().take(3).collect::<String>(), hoje.format("%d/%m"), partes.join("\n\n"));
+        self.tg.send_mudo(self.chat_id, &texto, if kb.is_empty() { None } else { Some(Value::Array(kb)) })?;
+        // a cobrança das 12:30 nunca apaga o bom-dia
+        self.ultima_cobranca = None;
+        if !avisos.is_empty() {
+            self.anota_aviso(&texto);
+        }
+        Ok(true)
+    }
+
+    /// Uma vez por semana (`dia_discussao`, na `hora_bom_dia`, logo depois dele e também mudo): as tarefas paradas
     /// (`tarefas::paradas`) numa mensagem, cada uma com ✅/🗑 e o quando dá pra fazer. true = estado mudou
     pub fn discussao_tick(&mut self, now: &crate::util::Dt) -> bool {
-        use chrono::Datelike;
         let hoje = now.format("%Y-%m-%d").to_string();
         if self.config.dia_discussao.is_empty() || crate::util::dia_semana(now) != self.config.dia_discussao
             || self.state.discussao_checada.as_deref() == Some(hoje.as_str()) {
             return false;
         }
-        let slots = &self.cobranca().slots[now.weekday().num_days_from_monday() as usize];
-        let hora = slots.iter().min().copied().unwrap_or(chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap());
-        if now.time() < hora {
+        if now.format("%H:%M").to_string() < self.config.hora_bom_dia {
             return false;
         }
         self.state.discussao_checada = Some(hoje);
@@ -1207,7 +1315,7 @@ impl Bot {
         let texto = format!(
             "🗂 <b>{} {} sem resposta</b> — quando dá pra fazer?\n{}\n\n🏢 dia útil, horário comercial · 🆓 dia útil, quando eu estiver livre · 💰 dia 1 a 10 · ➡️ amanhã. Ou me fala em texto.",
             ts.len(), if ts.len() == 1 { "tarefa" } else { "tarefas" }, linhas.join("\n"));
-        self.send(&texto, Some(Value::Array(kb)))?;
+        self.tg.send_mudo(self.chat_id, &texto, Some(Value::Array(kb)))?;
         self.anota_aviso(&texto);
         Ok(true)
     }
@@ -1293,26 +1401,18 @@ impl Bot {
         true
     }
 
-    /// aviso de chuva: à noite sobre amanhã, de manhã sobre o resto de hoje (uma vez por dia cada).
-    /// Falha da Open-Meteo só vai pro log; o dia fica marcado pra não tentar a cada volta. true = estado mudou
+    /// aviso de chuva da noite, sobre amanhã (o de hoje vai no bom-dia). Falha da Open-Meteo só vai pro log;
+    /// o dia fica marcado pra não tentar a cada volta. true = estado mudou
     pub fn rain_tick(&mut self, now: &crate::util::Dt) -> bool {
         let (Some(lat), Some(lon)) = (self.config.clima_lat, self.config.clima_lon) else { return false };
         if !self.config.chuva_aviso {
             return false;
         }
         let hoje = now.format("%Y-%m-%d").to_string();
-        let hm = now.format("%H:%M").to_string();
-        let noite = hm >= self.config.hora_chuva_noite && self.state.chuva_noite_checada.as_deref() != Some(hoje.as_str());
-        let manha = hm >= self.config.hora_chuva_manha && self.state.chuva_manha_checada.as_deref() != Some(hoje.as_str());
-        if !noite && !manha {
+        if now.format("%H:%M").to_string() < self.config.hora_chuva_noite || self.state.chuva_noite_checada.as_deref() == Some(hoje.as_str()) {
             return false;
         }
-        if noite {
-            self.state.chuva_noite_checada = Some(hoje.clone());
-        }
-        if manha {
-            self.state.chuva_manha_checada = Some(hoje);
-        }
+        self.state.chuva_noite_checada = Some(hoje);
         let horas = match self.clima.previsao(lat, lon) {
             Ok(h) => h,
             Err(e) => {
@@ -1320,23 +1420,12 @@ impl Bot {
                 return true;
             }
         };
-        let dia = now.date_naive();
-        // o bot subindo às 22h: a manhã de hoje já passou, só vale o aviso da noite
-        let mut avisos = vec![];
-        if manha && !noite {
-            avisos.push((dia, chrono::Timelike::hour(now), "hoje"));
-        }
-        if noite {
-            avisos.push((dia + chrono::Duration::days(1), 0, "amanhã"));
-        }
-        for (d, desde, rotulo) in avisos {
-            let periodos = crate::clima::periodos_chuva(&horas, d, desde, self.config.chuva_limiar);
-            if !periodos.is_empty() {
-                if let Err(e) = self.send(&crate::clima::texto_chuva(rotulo, &periodos), None) {
-                    println!("erro mandando aviso de chuva: {e}");
-                }
-                println!("chuva: aviso {rotulo}");
+        let periodos = crate::clima::periodos_chuva(&horas, now.date_naive() + chrono::Duration::days(1), 0, self.config.chuva_limiar);
+        if !periodos.is_empty() {
+            if let Err(e) = self.send(&crate::clima::texto_chuva("amanhã", &periodos), None) {
+                println!("erro mandando aviso de chuva: {e}");
             }
+            println!("chuva: aviso amanhã");
         }
         true
     }
@@ -1430,9 +1519,17 @@ impl Bot {
     }
 
     pub fn send_memory_review(&self, now: &crate::util::Dt, force: bool) -> R<()> {
+        if let Some((texto, kb)) = self.revisao_memoria(now, force)? {
+            self.send(&texto, Some(Value::Array(kb)))?;
+        }
+        Ok(())
+    }
+
+    /// texto e botões da revisão da memória (None = nada pra revisar; `force` = todos os fatos)
+    fn revisao_memoria(&self, now: &crate::util::Dt, force: bool) -> R<Option<(String, Vec<Value>)>> {
         let facts = if force { self.state.memoria.clone() } else { facts_to_review(&self.state, now, self.config.memoria_revisao_dias)? };
         if facts.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         let lines = facts.iter().enumerate().map(|(i, f)| format!("{}. {}{}", i + 1, esc(&f.texto), validity_note(f))).collect::<Vec<_>>().join("\n");
         let mut kb: Vec<Value> = facts
@@ -1442,8 +1539,7 @@ impl Bot {
             .collect();
         let ids = facts.iter().map(|f| f.id.to_string()).collect::<Vec<_>>().join(",");
         kb.push(json!([botao("✅ tudo certo", &format!("mem:all:{ids}"))]));
-        self.send(&format!("🧠 <b>Revisão da memória</b> — ainda vale?\n{lines}\n\nPra corrigir algum, me escreve o certo."), Some(Value::Array(kb)))?;
-        Ok(())
+        Ok(Some((format!("🧠 <b>Revisão da memória</b> — ainda vale?\n{lines}\n\nPra corrigir algum, me escreve o certo."), kb)))
     }
 
     fn on_memory_button(&mut self, data: &str) -> R<()> {
@@ -1472,44 +1568,42 @@ impl Bot {
         Ok(())
     }
 
-    pub fn check_maintenance_alerts(&mut self, now: &crate::util::Dt, force: bool) -> R<()> {
+    /// a manutenção do bom-dia: por veículo, só os itens vencidos na vez (`tarefas::manutencao_na_vez`),
+    /// já marcados como avisados. Cada seção = texto + um botão ✅ por item
+    pub fn manutencao_do_dia(&mut self, now: &crate::util::Dt) -> R<Vec<(String, Vec<Value>)>> {
         self.git_pull()?;
         let mconfig = self.mr.load_config()?;
-        // por dia de calendário: o aviso de ontem 06:00:11 não pode segurar o de hoje 06:00:05
-        let repeat = self.config.manutencao_repetir_dias.ceil() as i64;
+        let mut out = vec![];
         for (vehicle, items) in overdue_maintenance(&self.mr, &mconfig, now)? {
             if self.config.manutencao_veiculos.as_ref().is_some_and(|vs| !vs.iter().any(|v| crate::agenda::fold(&vehicle).contains(&crate::agenda::fold(v)))) {
                 continue;
             }
-            let mut keys: Vec<String> = items.iter().map(|(k, _)| k.clone()).collect();
-            keys.sort();
-            if !force {
-                if let Some(last) = self.state.avisos_manutencao.get(&vehicle) {
-                    if last.get("itens") == Some(&json!(keys)) {
-                        let em = last.get("em").and_then(Value::as_str).ok_or_else(|| Erro::Chave("'em'".into()))?;
-                        if (now.date_naive() - from_iso(em)?.date_naive()).num_days() < repeat {
-                            continue;
-                        }
-                    }
-                }
+            let vencidos: Vec<String> = items.iter().map(|(k, _)| k.clone()).collect();
+            let vez = crate::tarefas::manutencao_na_vez(self.state.avisos_manutencao.get(&vehicle), &vencidos, now,
+                self.config.manutencao_repetir_dias, self.config.cobranca_fator, self.config.manutencao_max_dias);
+            crate::tarefas::marca_manutencao(&mut self.state.avisos_manutencao, &vehicle, &vencidos, &vez, now);
+            let items: Vec<(String, String)> = items.into_iter().filter(|(k, _)| vez.contains(k)).collect();
+            if !items.is_empty() {
+                out.push(Self::secao_manutencao(&mconfig, &vehicle, &items));
             }
-            self.send_maintenance(&mconfig, &vehicle, &items, now)?;
         }
-        Ok(())
+        Ok(out)
     }
 
-    /// "🔧 <veículo> — manutenção vencida" com um botão ✅ por item; conta como o aviso do dia (`avisos_manutencao`)
-    fn send_maintenance(&mut self, mconfig: &crate::motoregis::MotorConfig, vehicle: &str, items: &[(String, String)], now: &crate::util::Dt) -> R<()> {
-        let mut keys: Vec<String> = items.iter().map(|(k, _)| k.clone()).collect();
-        keys.sort();
+    /// "🔧 <veículo> — manutenção vencida" com um botão ✅ por item
+    fn secao_manutencao(mconfig: &crate::motoregis::MotorConfig, vehicle: &str, items: &[(String, String)]) -> (String, Vec<Value>) {
         let idx = mconfig.veiculos_index.iter().position(|(n, _)| *n == vehicle).unwrap();
         let kb: Vec<Value> = items.iter().map(|(k, label)| json!([botao(&format!("✅ {label}"), &format!("mnt:{idx}:{k}"))])).collect();
         let lines = items.iter().map(|(_, l)| format!("• {}", esc(l))).collect::<Vec<_>>().join("\n");
-        self.send(
-            &format!("🔧 <b>{}</b> — manutenção vencida:\n{lines}\n\nToca no que você já fez (grava com a data de hoje):", esc(vehicle)),
-            Some(Value::Array(kb)),
-        )?;
-        self.state.avisos_manutencao.insert(vehicle.to_string(), json!({"itens": keys, "em": iso(now)}));
+        (format!("🔧 <b>{}</b> — manutenção vencida:\n{lines}", esc(vehicle)), kb)
+    }
+
+    /// depois de salvar o abastecimento (ele está no posto): todos os vencidos do veículo; conta como aviso de cada um
+    fn send_maintenance(&mut self, mconfig: &crate::motoregis::MotorConfig, vehicle: &str, items: &[(String, String)], now: &crate::util::Dt) -> R<()> {
+        let (texto, kb) = Self::secao_manutencao(mconfig, vehicle, items);
+        self.send(&format!("{texto}\n\nToca no que você já fez (grava com a data de hoje):"), Some(Value::Array(kb)))?;
+        let keys: Vec<String> = items.iter().map(|(k, _)| k.clone()).collect();
+        crate::tarefas::marca_manutencao(&mut self.state.avisos_manutencao, vehicle, &keys, &keys, now);
         Ok(())
     }
 
@@ -1567,7 +1661,7 @@ impl Bot {
         let mconfig = self.mr.load_config()?;
         let (odo, estimado, rows) = record_maintenance(&self.mr, &mconfig, vehicle, items, cost, date, odo)?;
         let sync = self.git_push(vehicle, date)?;
-        self.state.avisos_manutencao.remove(vehicle);
+        crate::tarefas::esquece_manutencao(&mut self.state.avisos_manutencao, vehicle, items, &agora());
         self.save_state()?;
         println!("manutenção: {vehicle} {} {date} {} km R$ {} ({sync})", repr_lista(items), fmt_g(odo), crate::util::fmt_f(cost, 2));
         self.last_op = Some(op_csv(&csv, &rows, vehicle));
@@ -1773,20 +1867,8 @@ impl Bot {
             Atalho::Tarefas => (tasks_overview(&self.state)?, None),
             Atalho::Rotina => (crate::rotina::texto_rotina(&self.config.horarios_fixos(), &self.rotina, self.config.antecedencia_min as i64), None),
             Atalho::Agenda { inicio, dias, rotulo } => {
-                let start = crate::util::no_fuso(inicio.and_hms_opt(0, 0, 0).unwrap());
-                let end = crate::util::no_fuso((inicio + chrono::Duration::days(dias)).and_hms_opt(0, 0, 0).unwrap());
-                let events = self.google()?.list_events(&start, &end, None)?;
                 let dia = inicio.format("%d/%m").to_string();
-                let mut lines = vec![];
-                for e in events.iter().filter(|e| crate::agenda::fold(&crate::util::str_num(e.get("summary").unwrap_or(&Value::Null))) != "sono") {
-                    let l = crate::agenda::agenda_line(e)?;
-                    // dia só: tira o "sex 02/10 · " da frente quando é o próprio dia
-                    let l = match l.split_once(" · ") {
-                        Some((pre, rest)) if dias == 1 && pre.ends_with(&dia) => rest.to_string(),
-                        _ => l,
-                    };
-                    lines.push(format!("• {}", esc(&l)));
-                }
+                let lines = self.linhas_agenda(inicio, dias)?;
                 let quando = if dias == 1 { format!("{rotulo} ({} {dia})", crate::util::dia_semana(&inicio).chars().take(3).collect::<String>()) } else { rotulo };
                 let r = if lines.is_empty() { format!("Nada na agenda pra {quando}.") } else { format!("📅 <b>{}</b>\n{}", esc(&quando), lines.join("\n")) };
                 (r, None)

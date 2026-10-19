@@ -66,6 +66,9 @@ pub struct Estado {
     /// dia em que a discussão das tarefas paradas já saiu
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub discussao_checada: Option<String>,
+    /// dia em que o bom-dia já saiu
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bom_dia_checado: Option<String>,
     /// chaves de topo desconhecidas (ex.: recursos novos do argos.py): preservadas no save
     #[serde(flatten)]
     pub resto: Map<String, Value>,
@@ -107,6 +110,7 @@ impl Default for Estado {
             alerta_falha_desde: None,
             alerta_falha_avisada: None,
             discussao_checada: None,
+            bom_dia_checado: None,
             resto: Map::new(),
         }
     }
@@ -345,6 +349,18 @@ pub fn paradas(state: &Estado) -> Vec<&Tarefa> {
     v
 }
 
+/// O resto do dia pro bom-dia: tarefa que vence hoje depois de agora e pendente com a próxima cobrança hoje
+/// ("HH:MM", texto), em ordem de hora. Pausada e as de `fora` (já cobrando no próprio bom-dia) não entram.
+pub fn mais_tarde_hoje(state: &Estado, now: &Dt, fora: &[i64]) -> Vec<(String, String)> {
+    let mut v: Vec<(Dt, String)> = state.tarefas.iter().filter(|t| !fora.contains(&t.id) && pausa_ate(t).is_none_or(|f| f <= *now)).filter_map(|t| {
+        let quando = if t.pendente { t.cobrar_em.as_deref().filter(|c| !c.is_empty())? } else { t.proximo.as_str() };
+        let q = from_iso(quando).ok()?;
+        (q > *now && q.date_naive() == now.date_naive()).then(|| (q, t.texto.clone()))
+    }).collect();
+    v.sort_by_key(|(q, _)| *q);
+    v.into_iter().map(|(q, t)| (q.format("%H:%M").to_string(), t)).collect()
+}
+
 /// cobranças que saíram sem ele tocar na tarefa (`sem_resposta` via `resto`; tarefa de antes disso: as `cobrancas`)
 pub fn sem_resposta(t: &Tarefa) -> i64 {
     t.resto.get("sem_resposta").and_then(Value::as_i64).unwrap_or(t.cobrancas)
@@ -563,8 +579,9 @@ pub fn task_tick(t: &mut Tarefa, now: &Dt, cfg: &CfgCobranca) -> R<Option<Aviso>
                 t.cobrar_em = Some(iso(&encaixe(t, &(*now + espera(t, cfg)), cfg)?));
                 return Ok(Some(Aviso::Vence));
             }
-            t.cobrancas += 1;
+            // antes do cobrancas += 1: sem o campo, sem_resposta lê as cobrancas
             set_sem_resposta(t, sem_resposta(t) + 1);
+            t.cobrancas += 1;
             t.cobrar_em = Some(iso(&encaixe(t, &(*now + espera(t, cfg)), cfg)?));
             return Ok(Some(Aviso::Cobra));
         }
@@ -943,6 +960,62 @@ pub fn overdue_maintenance(mr: &Motoregis, mconfig: &MotorConfig, today: &Dt) ->
         }
     }
     Ok(out)
+}
+
+/// Avisos de manutenção de um veículo (`avisos_manutencao[veículo]`): chave → (último aviso, quantas vezes).
+/// Formato antigo `{itens: [chaves], em}` (um aviso pra lista toda) vira cada chave com aquele `em`, 1 vez.
+fn avisos_por_item(v: Option<&Value>) -> Vec<(String, Dt, i64)> {
+    let Some(v) = v else { return vec![] };
+    match v.get("itens") {
+        Some(Value::Array(ks)) => {
+            let Some(em) = v.get("em").and_then(Value::as_str).and_then(|s| from_iso(s).ok()) else { return vec![] };
+            ks.iter().filter_map(Value::as_str).map(|k| (k.to_string(), em, 1)).collect()
+        }
+        Some(Value::Object(m)) => m.iter().filter_map(|(k, a)| {
+            let em = from_iso(a.get("em")?.as_str()?).ok()?;
+            Some((k.clone(), em, a.get("vezes").and_then(Value::as_i64).unwrap_or(1)))
+        }).collect(),
+        _ => vec![],
+    }
+}
+
+/// Dos itens vencidos, os que estão na vez de avisar: nunca avisado, ou passaram
+/// `repetir_dias × fator^(vezes−1)` dias de calendário (até `max_dias`) do último aviso dele.
+/// Com 1 dia e 1,5: avisa nos dias 0, 1, 3, 6, 9… — item novo não arrasta os velhos.
+pub fn manutencao_na_vez(avisos: Option<&Value>, vencidos: &[String], now: &Dt, repetir_dias: f64, fator: f64, max_dias: f64) -> Vec<String> {
+    let ja = avisos_por_item(avisos);
+    vencidos.iter().filter(|k| match ja.iter().find(|(x, _, _)| x == *k) {
+        None => true,
+        Some((_, em, vezes)) => {
+            let espera = (repetir_dias * fator.max(1.0).powi((*vezes - 1).clamp(0, 30) as i32)).min(max_dias).ceil() as i64;
+            (now.date_naive() - em.date_naive()).num_days() >= espera
+        }
+    }).cloned().collect()
+}
+
+/// grava o aviso de `avisados` agora (+1 vez) e esquece os itens que não estão mais em `vencidos`
+pub fn marca_manutencao(avisos: &mut Map<String, Value>, veiculo: &str, vencidos: &[String], avisados: &[String], now: &Dt) {
+    let mut itens = Map::new();
+    for (k, em, vezes) in avisos_por_item(avisos.get(veiculo)) {
+        if vencidos.contains(&k) {
+            itens.insert(k, json!({"em": iso(&em), "vezes": vezes}));
+        }
+    }
+    for k in avisados {
+        let vezes = itens.get(k).and_then(|a| a.get("vezes")).and_then(Value::as_i64).unwrap_or(0) + 1;
+        itens.insert(k.clone(), json!({"em": iso(now), "vezes": vezes}));
+    }
+    if itens.is_empty() {
+        avisos.remove(veiculo);
+    } else {
+        avisos.insert(veiculo.to_string(), json!({ "itens": itens }));
+    }
+}
+
+/// registrou a manutenção: aqueles itens recomeçam do zero
+pub fn esquece_manutencao(avisos: &mut Map<String, Value>, veiculo: &str, feitos: &[String], now: &Dt) {
+    let ficam: Vec<String> = avisos_por_item(avisos.get(veiculo)).into_iter().map(|(k, _, _)| k).filter(|k| !feitos.contains(k)).collect();
+    marca_manutencao(avisos, veiculo, &ficam, &[], now);
 }
 
 pub fn maintenance_items(mr: &Motoregis, mconfig: &MotorConfig) -> R<Vec<(String, Vec<String>)>> {

@@ -12,8 +12,9 @@ O que ele faz:
 - **Memória:** guarda fatos que você conta (*"a Carla é minha chefe"*), com validade opcional (ou presa ao fim de um evento da agenda), e pede revisão a cada 14 dias. `/memoria` mostra tudo com botões.
 - **Desfazer:** toda gravação vem com botão **↩️ desfazer**: abastecimento, manutenção, tarefa feita, evento e memória. Também dá pra pedir *"desfaz isso"*.
 - **Abastecimento (opcional):** foto da bomba + odômetro (+ cupom fiscal) → o Claude lê → rascunho com botões → grava no CSV do veículo e responde com o consumo e o custo por km.
-- **Manutenção (opcional):** confere os prazos de cada item (km, meses ou dias) e avisa o que venceu, com o botão "✅ fiz".
-- **Chuva (opcional):** às 21h avisa em que horários de amanhã a chance de chuva passa do limite, e às 6h30 confirma o resto do dia. Também responde *"vai chover amanhã?"*. Usa a Open-Meteo, sem chave e sem passar pelo Claude.
+- **Bom-dia:** às 6h, uma mensagem só e sem som com o que você tem pro dia: agenda, chuva, tarefas cobrando e o resto do dia, manutenção vencida e a revisão da memória, cada um com seus botões.
+- **Manutenção (opcional):** confere os prazos de cada item (km, meses ou dias) e avisa o que venceu no bom-dia, com o botão "✅ fiz". Item que você não marca volta cada vez mais espaçado, até `manutencao_max_dias` (3).
+- **Chuva (opcional):** às 21h avisa em que horários de amanhã a chance de chuva passa do limite, e o bom-dia confirma o resto do dia. Também responde *"vai chover amanhã?"*. Usa a Open-Meteo, sem chave e sem passar pelo Claude.
 - **Alerta de temporal (opcional):** avisos do INMET pro município (só vermelho dispara) e a previsão hora a hora num ponto (rajada, chuva forte, granizo). Responde no `/temporal`.
 - **Onde abastecer (opcional):** `/postos` ordena os postos da cidade por **custo por 100 km**: o preço da semana na pesquisa da ANP ÷ quanto aquele posto rendeu no seu histórico.
 - **Duas pessoas:** cada uma com o seu bot. Um pode consultar a agenda, a memória e as tarefas do outro (menos o que for privado) e mandar recado.
@@ -57,6 +58,8 @@ Só `usuario` é obrigatória. O resto tem padrão:
 | `cobrar_a_cada_h`, `janela_cobranca` | cobrança padrão das tarefas (cada tarefa pode ter as suas) |
 | `cobranca_fator`, `cobranca_max_h` | cada cobrança sem resposta multiplica o intervalo (padrão 1,5, até 72 h) |
 | `horarios_cobranca`, `antecedencia_min` | horários fixos de cobrança (`["07:30", "21:30"]`), somados aos aprendidos da sua rotina; a cobrança sai `antecedencia_min` (20) antes do costume |
+| `hora_bom_dia` | hora do bom-dia (padrão `"06:00"`); tarefa sem hora cai no 1º horário de cobrança daquele dia da semana |
+| `manutencao_repetir_dias`, `manutencao_max_dias` | item vencido sem resposta volta depois disso × `cobranca_fator`, até o máximo (padrão 3 e 3) |
 | `horario_comercial`, `dia_discussao` | janelas da condição "dia útil, horário comercial"; dia da lista das tarefas paradas (padrão `"sexta"`, `""` desliga) |
 | `clima_lat`, `clima_lon`, `chuva_limiar` | liga o aviso de chuva; `chuva_aviso: false` deixa só a consulta |
 | `alerta_geocode` (código IBGE), `alerta_nome`, `alerta_lat`, `alerta_lon` | liga o alerta de temporal |

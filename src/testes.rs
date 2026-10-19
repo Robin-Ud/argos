@@ -1203,8 +1203,9 @@ fn periodos_de_chuva() {
     assert_eq!(crate::clima::resumo_sem_chuva("amanhã", &h, sex, 19), "☀️ amanhã sem chuva forte prevista (máx 72% às 23h)");
 }
 
+/// o da noite sobre amanhã (o de hoje vai no bom-dia: `bom_dia_ponta_a_ponta`)
 #[test]
-fn aviso_de_chuva_noite_e_manha() {
+fn aviso_de_chuva_da_noite() {
     let tmp = TempDir::new("argos_chuva.");
     let motor = tmp.0.join("motor");
     copia(&fixture("motor"), &motor);
@@ -1216,12 +1217,12 @@ fn aviso_de_chuva_noite_e_manha() {
     bot.config.clima_lon = Some(-46.6);
     let ok = json!({"ok": true, "result": {"message_id": 7}});
     let chuva = meteo(&[(2, 7, 80.0, 1.0), (2, 8, 90.0, 2.0), (2, 17, 75.0, 0.4)]);
-    let (url, rx) = claude_falso(vec![(200, chuva.clone()), (200, ok.clone()), (200, chuva), (200, ok)]);
+    let (url, rx) = claude_falso(vec![(200, chuva), (200, ok)]);
     let base = url.trim_end_matches("/v1/messages").to_string();
     bot.clima.base = base.clone();
     bot.tg.base = base;
-    // 20h59: nada (a manhã de 01/10 já foi marcada como vista)
-    bot.state.chuva_manha_checada = Some("2026-10-01".into());
+    // de manhã nada: é o bom-dia
+    assert!(!bot.rain_tick(&at("2026-10-01T06:30")));
     assert!(!bot.rain_tick(&at("2026-10-01T20:59")));
     // 21h: previsão de amanhã inteira
     assert!(bot.rain_tick(&at("2026-10-01T21:00")));
@@ -1230,12 +1231,8 @@ fn aviso_de_chuva_noite_e_manha() {
     assert_eq!(rx.recv().unwrap().corpo["text"], "🌧️ <b>Chuva amanhã</b>\n• 7h–9h — até 90%, ~3 mm\n• 17h–18h — até 75%, ~0.4 mm");
     // não repete no mesmo dia
     assert!(!bot.rain_tick(&at("2026-10-01T23:00")));
-    // manhã seguinte, 8h: só o que falta de hoje
-    assert!(bot.rain_tick(&at("2026-10-02T08:10")));
-    rx.recv().unwrap();
-    assert_eq!(rx.recv().unwrap().corpo["text"], "🌧️ <b>Chuva hoje</b>\n• 8h–9h — até 90%, ~2 mm\n• 17h–18h — até 75%, ~0.4 mm");
+    assert!(!bot.rain_tick(&at("2026-10-02T08:10")));
     assert!(rx.try_recv().is_err());
-    assert_eq!(bot.state.chuva_manha_checada.as_deref(), Some("2026-10-02"));
 }
 
 #[test]
@@ -1248,7 +1245,6 @@ fn sem_chuva_nao_manda_nada() {
     bot.config.clima_lon = Some(-46.6);
     let (url, rx) = claude_falso(vec![(200, meteo(&[(2, 14, 69.0, 0.3)]))]);
     bot.clima.base = url.trim_end_matches("/v1/messages").to_string();
-    bot.state.chuva_manha_checada = Some("2026-10-01".into());
     assert!(bot.rain_tick(&at("2026-10-01T21:30")));
     rx.recv().unwrap(); // só o GET
     std::thread::sleep(std::time::Duration::from_millis(50));
@@ -2635,31 +2631,39 @@ fn cobranca_so_no_horario_util() {
     assert_eq!(into_janelas(&at("2026-10-09T17:50"), &[(chrono::NaiveTime::from_hms_opt(8, 0, 0).unwrap(), chrono::NaiveTime::from_hms_opt(11, 59, 0).unwrap())]), at("2026-10-10T08:00"));
 }
 
+/// 19/10: "Esticar corrente" todo dia (repetir 1) e item novo reenviando os velhos. Agora por item, espaçado
+/// ×1,5 até 3 dias (dias 0, 1, 3, 6), por dia de calendário; o formato antigo do estado migra
 #[test]
-fn aviso_de_manutencao_todo_dia_por_calendario() {
-    // repetir_dias 1: o aviso de ontem 06:00:11 não segura o de hoje 06:00:05; no mesmo dia não repete
-    let tmp = TempDir::new("argos_mnt_dia.");
-    let motor = tmp.0.join("motor");
-    copia(&fixture("motor"), &motor);
-    let mut bot = bot_de_teste(&tmp.0, &motor);
-    std::fs::create_dir_all(tmp.0.join("dados")).unwrap();
-    bot.config.manutencao_repetir_dias = 1.0;
-    let (url, rx) = claude_falso(vec![(200, json!({"ok": true, "result": {"message_id": 7}})); 4]);
-    bot.tg.base = url.trim_end_matches("/v1/messages").to_string();
-    let hoje = at("2026-10-07T06:00:05");
-    let mconfig = bot.mr.load_config().unwrap();
-    let vencidas = overdue_maintenance(&bot.mr, &mconfig, &hoje).unwrap();
-    assert!(!vencidas.is_empty());
-    for (v, items) in &vencidas {
-        let mut keys: Vec<String> = items.iter().map(|(k, _)| k.clone()).collect();
-        keys.sort();
-        bot.state.avisos_manutencao.insert(v.clone(), json!({"itens": keys, "em": "2026-10-06T06:00:11-03:00"}));
+fn manutencao_espacada_ate_3_dias() {
+    use crate::tarefas::{esquece_manutencao, manutencao_na_vez, marca_manutencao};
+    let (k1, k2) = ("esticar_corrente".to_string(), "inspecao_geral".to_string());
+    let mut av = serde_json::Map::new();
+    let na_vez = |av: &serde_json::Map<String, Value>, vs: &[String], quando: &str| manutencao_na_vez(av.get("Moto"), vs, &at(quando), 1.0, 1.5, 3.0);
+    let um = vec![k1.clone()];
+    let mut avisos = vec![];
+    for d in 0..10 {
+        let quando = format!("2026-10-{:02}T06:00:{:02}", 10 + d, 59 - d); // o de ontem 06:00:59 não segura o de hoje 06:00:50
+        let vez = na_vez(&av, &um, &quando);
+        if !vez.is_empty() {
+            avisos.push(d);
+        }
+        marca_manutencao(&mut av, "Moto", &um, &vez, &at(&quando));
+        assert!(na_vez(&av, &um, &format!("2026-10-{:02}T20:00", 10 + d)).is_empty(), "não repete no mesmo dia");
     }
-    bot.check_maintenance_alerts(&hoje, false).unwrap();
-    let p = rx.recv_timeout(std::time::Duration::from_secs(2)).expect("tinha que avisar hoje");
-    assert!(p.corpo["text"].as_str().unwrap().contains("manutenção vencida"));
-    bot.check_maintenance_alerts(&at("2026-10-07T20:00"), false).unwrap();
-    assert!(rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(), "não repete no mesmo dia");
+    assert_eq!(avisos, vec![0, 1, 3, 6, 9]);
+    // item novo vence: só ele sai
+    let dois = vec![k1.clone(), k2.clone()];
+    assert_eq!(na_vez(&av, &dois, "2026-10-20T06:00"), vec![k2.clone()]);
+    // feito: some do estado e, vencendo de novo um dia, começa do zero
+    esquece_manutencao(&mut av, "Moto", &um, &at("2026-10-20T06:00"));
+    assert!(av.is_empty());
+    // formato antigo: a lista toda avisada ontem (1 vez)
+    av.insert("Moto".into(), json!({"itens": [k1.clone()], "em": "2026-10-19T06:00:11-03:00"}));
+    assert_eq!(na_vez(&av, &dois, "2026-10-20T06:00"), dois);
+    assert_eq!(manutencao_na_vez(av.get("Moto"), &dois, &at("2026-10-20T06:00"), 3.0, 1.5, 3.0), vec![k2.clone()]);
+    marca_manutencao(&mut av, "Moto", &dois, std::slice::from_ref(&k2), &at("2026-10-20T06:00"));
+    assert_eq!(av["Moto"]["itens"][&k1], json!({"em": "2026-10-19T06:00:11-03:00", "vezes": 1}));
+    assert_eq!(av["Moto"]["itens"][&k2]["vezes"], 1);
 }
 
 #[test]
@@ -2723,14 +2727,13 @@ fn tick_segue_quando_um_aviso_falha() {
     let mut bot = bot_de_teste(&tmp.0, &motor);
     bot.tg.base = "http://127.0.0.1:9".into(); // todo envio falha
     bot.mr = Motoregis::new(&tmp.0.join("nao_existe"));
-    (bot.config.hora_manutencao, bot.config.hora_revisao_memoria) = ("00:00".into(), "00:00".into());
+    bot.config.hora_bom_dia = "00:00".into();
     (bot.config.clima_lat, bot.config.alerta_geocode, bot.config.postos_municipio) = (None, None, None);
     remember(&mut bot.state, "fato velho", &(crate::util::agora() - chrono::Duration::days(30)), None);
     bot.tick().unwrap();
     let salvo = load_state(&bot.state_path).unwrap();
     let hoje = crate::util::agora().format("%Y-%m-%d").to_string();
-    assert_eq!(salvo.manutencao_checada.as_deref(), Some(hoje.as_str()));
-    assert_eq!(salvo.memoria_checada.as_deref(), Some(hoje.as_str())); // passou do aviso de manutenção que falhou
+    assert_eq!(salvo.bom_dia_checado.as_deref(), Some(hoje.as_str()));
 }
 
 /// hábito: concluir antes da cobrança grava direto no tracker.csv (sem botão de confirmação) e o ↩️ tira a linha
@@ -3170,7 +3173,7 @@ fn agenda_do_parceiro_so_leitura() {
     assert!(rx.recv().unwrap().headers.starts_with("get /calendars/m%40exemplo.com/events?"));
 }
 
-/// aviso das 06:00 só dos veículos de `manutencao_veiculos` (na fixture só a Titan tem registros vencidos)
+/// aviso de manutenção só dos veículos de `manutencao_veiculos` (na fixture só a Titan tem registros vencidos)
 #[test]
 fn aviso_de_manutencao_so_dos_veiculos_escolhidos() {
     let tmp = TempDir::new("argos_mnt_filtro.");
@@ -3181,11 +3184,11 @@ fn aviso_de_manutencao_so_dos_veiculos_escolhidos() {
     let (url, rx) = claude_falso(vec![(200, json!({"ok": true, "result": {"message_id": 7}})); 4]);
     bot.tg.base = url.trim_end_matches("/v1/messages").to_string();
     bot.config.manutencao_veiculos = Some(vec!["Onix".into()]);
-    bot.check_maintenance_alerts(&at("2026-10-07T06:00"), false).unwrap();
-    assert!(rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(), "a moto não é dela");
+    assert!(bot.manutencao_do_dia(&at("2026-10-07T06:00")).unwrap().is_empty(), "a moto não é dela");
     bot.config.manutencao_veiculos = Some(vec!["titan".into()]);
-    bot.check_maintenance_alerts(&at("2026-10-07T06:00"), false).unwrap();
-    assert!(rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap().corpo["text"].as_str().unwrap().contains("Titan"));
+    let s = bot.manutencao_do_dia(&at("2026-10-07T06:00")).unwrap();
+    assert!(s.len() == 1 && s[0].0.contains("Titan"), "{s:?}");
+    assert!(rx.try_recv().is_err(), "quem manda é o bom-dia");
 }
 
 /// chuva desligada: atalho responde que está desligado, /atalhos sem a linha;
@@ -3476,10 +3479,11 @@ fn discussao_de_sexta_ponta_a_ponta() {
     let ids: Vec<i64> = bot.state.tarefas.iter().map(|t| t.id).collect();
 
     assert!(!bot.discussao_tick(&at("2026-10-22T10:00"))); // quinta
-    assert!(!bot.discussao_tick(&at("2026-10-23T08:30"))); // sexta antes das 9h (sem horário de costume)
-    assert!(bot.discussao_tick(&at("2026-10-23T09:00")));
+    assert!(!bot.discussao_tick(&at("2026-10-23T05:59"))); // sexta antes do bom-dia
+    assert!(bot.discussao_tick(&at("2026-10-23T06:00")));
     assert!(!bot.discussao_tick(&at("2026-10-23T15:00"))); // uma vez por dia
     let m = rx.recv().unwrap().corpo;
+    assert_eq!(m["disable_notification"], true);
     let txt = m["text"].as_str().unwrap();
     assert!(txt.starts_with("🗂 <b>2 tarefas sem resposta</b>") && txt.contains("academia") && txt.contains("pedágio") && !txt.contains("regar"), "{txt}");
     let kb = m["reply_markup"]["inline_keyboard"].as_array().unwrap();
@@ -3566,4 +3570,96 @@ fn numero_solto_no_corrigir() {
     d.obs = "reflexo".into();
     assert_eq!(apply_correction(&mut d, "km 4400", &ctx.fuel_types, &ctx.nomes()).unwrap(), vec!["odometro"]);
     assert!(d.obs.is_empty());
+}
+
+/// 19/10: 🔧 às 06:00 (dormindo), ☔ e ⏰ às 06:30, 🧠 às 10h. Agora tudo às 06:00 numa mensagem muda:
+/// agenda sem o Sono, chuva de hoje, o que cobraria agora (conta como a cobrança), o resto do dia,
+/// a manutenção e a memória, com os botões de cada um
+#[test]
+fn bom_dia_ponta_a_ponta() {
+    let tmp = TempDir::new("argos_bom_dia.");
+    let motor = tmp.0.join("motor");
+    copia(&fixture("motor"), &motor);
+    let mut bot = bot_de_teste(&tmp.0, &motor);
+    let agenda = json!({"items": [
+        {"id": "1", "summary": "Sono", "start": {"dateTime": "2026-10-01T23:00:00-03:00"}, "end": {"dateTime": "2026-10-02T06:30:00-03:00"}},
+        {"id": "2", "summary": "Dentista", "start": {"dateTime": "2026-10-02T14:00:00-03:00"}, "end": {"dateTime": "2026-10-02T15:00:00-03:00"}}]});
+    let (url, rx) = claude_falso(vec![(200, json!({"access_token": "tok", "expires_in": 3600})), (200, agenda),
+                                      (200, meteo(&[(2, 8, 90.0, 2.0)])), (200, json!({"ok": true, "result": {"message_id": 7}}))]);
+    let base = url.trim_end_matches("/v1/messages").to_string();
+    let cred = tmp.0.join("cred");
+    std::fs::write(cred.join("google_client.json"), json!({"installed": {"client_id": "x", "client_secret": "y", "token_uri": format!("{base}/token")}}).to_string()).unwrap();
+    bot.gcal = Some(crate::gcal::GoogleCalendar::new(crate::rede::agente(), &cred).unwrap());
+    bot.gcal.as_mut().unwrap().base = base.clone();
+    bot.clima.base = base.clone();
+    bot.tg.base = base;
+    new_task(&mut bot.state, "acertar com a academia", "2026-09-30T09:00", None, false, "09:00").unwrap();
+    bot.state.tarefas[0].pendente = true;
+    bot.state.tarefas[0].cobrar_em = Some("2026-10-02T05:00:00-03:00".into());
+    new_task(&mut bot.state, "pegar o fone", "2026-10-02T06:00", None, false, "09:00").unwrap();
+    new_task(&mut bot.state, "regar as plantas", "2026-10-02T18:00", None, false, "09:00").unwrap();
+    new_task(&mut bot.state, "exames", "2026-10-03T06:30", None, false, "09:00").unwrap(); // amanhã: fora
+    remember(&mut bot.state, "a Carla é minha chefe", &at("2026-09-01T10:00"), None);
+    bot.ultima_cobranca = Some((3, vec![1]));
+    let cfg = bot.cobranca();
+
+    let now = at("2026-10-02T06:00");
+    assert!(bot.send_bom_dia(&now, &cfg).unwrap());
+    let msgs: Vec<Pedido> = rx.iter().filter(|p| p.headers.starts_with("post /sendmessage")).collect();
+    assert_eq!(msgs.len(), 1, "uma mensagem só");
+    let m = &msgs[0].corpo;
+    assert_eq!(m["disable_notification"], true);
+    let t = m["text"].as_str().unwrap();
+    assert!(t.starts_with("☀️ <b>Bom dia</b> — sex 02/10\n\n📅 <b>Agenda</b>\n• 14h Dentista"), "{t}");
+    assert!(!t.contains("Sono"), "{t}");
+    assert!(t.contains("🌧️ <b>Chuva hoje</b>\n• 8h–9h"), "{t}");
+    assert!(t.contains("⏰ <b>Cobrando</b>\n• acertar com a academia <i>(desde qua 30/09)</i>\n• pegar o fone 🔔"), "{t}");
+    assert!(t.contains("🕒 <b>Mais tarde</b>\n• 18:00 regar as plantas") && !t.contains("exames"), "{t}");
+    assert!(t.contains("🔧 <b>Honda CG 160 Titan</b> — manutenção vencida:"), "{t}");
+    assert!(t.contains("🧠 <b>Revisão da memória</b>"), "{t}");
+    let dados: Vec<String> = m["reply_markup"]["inline_keyboard"].as_array().unwrap().iter()
+        .flat_map(|l| l.as_array().unwrap().iter().map(|b| b["callback_data"].as_str().unwrap().to_string())).collect();
+    for p in ["tar:ok:", "tar:qq:", "tar:am:", "mnt:", "mem:ok:", "mem:all:"] {
+        assert!(dados.iter().any(|d| d.starts_with(p)), "{p} {dados:?}");
+    }
+    // contou como a cobrança: às 06:30 não sai de novo; a cobrança seguinte não apaga o bom-dia
+    assert_eq!(bot.ultima_cobranca, None);
+    assert_eq!(sem_resposta(&bot.state.tarefas[0]), 1);
+    for i in 0..2 {
+        assert_eq!(task_tick(&mut bot.state.tarefas[i], &at("2026-10-02T06:30"), &cfg).unwrap(), None);
+    }
+    // manutenção já avisada não volta no dia seguinte (repetir 3 dias no completo.json)
+    assert!(bot.manutencao_do_dia(&at("2026-10-03T06:00")).unwrap().is_empty());
+
+    // nada pra dizer: não manda
+    let (url, rx) = claude_falso(vec![(200, json!({"ok": true, "result": {"message_id": 8}}))]);
+    bot.tg.base = url.trim_end_matches("/v1/messages").to_string();
+    (bot.config.tem_google, bot.config.tem_veiculos, bot.config.clima_lat) = (false, false, None);
+    bot.state.tarefas.clear();
+    bot.state.memoria.clear();
+    assert!(!bot.send_bom_dia(&at("2026-10-04T06:00"), &cfg).unwrap());
+    assert!(rx.recv_timeout(std::time::Duration::from_millis(200)).is_err());
+}
+
+/// "pra amanhã" sem hora: no 1º horário de cobrança daquele dia da semana (09:00 caía com ele no trabalho)
+#[test]
+fn tarefa_so_data_cai_no_primeiro_horario() {
+    use chrono::Datelike;
+    let tmp = TempDir::new("argos_hora_padrao.");
+    let motor = tmp.0.join("motor");
+    copia(&fixture("motor"), &motor);
+    let mut bot = bot_de_teste(&tmp.0, &motor);
+    assert_eq!(bot.hora_padrao_em("2099-01-06"), "09:00"); // sem horário nenhum
+    bot.config.horarios_cobranca = vec!["21:30".into(), "06:30".into()];
+    let amanha = crate::util::agora().date_naive() + chrono::Duration::days(1);
+    let d = amanha.format("%Y-%m-%d").to_string();
+    assert_eq!(bot.hora_padrao_em(&d), "06:30");
+    assert_eq!(bot.hora_padrao_em(&format!("{d}T15:00")), "09:00"); // com hora: o new_task nem usa
+    // horário de costume aprendido daquele dia da semana entra junto
+    let w = amanha.weekday().num_days_from_monday() as usize;
+    bot.rotina[w] = vec![chrono::NaiveTime::from_hms_opt(5, 40, 0).unwrap()];
+    assert_eq!(bot.hora_padrao_em(&d), "05:40");
+    // pelo criar_tarefa
+    bot.run_tool("criar_tarefa", &json!({"texto": "sorologia", "quando": d, "repetir_dias": null, "contar_desde_feito": false})).unwrap();
+    assert!(bot.state.tarefas.last().unwrap().proximo.starts_with(&format!("{d}T05:40")));
 }

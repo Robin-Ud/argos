@@ -123,6 +123,15 @@ impl Telegram {
         self.call("sendMessage", 30, p)
     }
 
+    /// sem som nem vibração (o bom-dia sai às 6h, com ele dormindo)
+    pub fn send_mudo(&self, chat_id: i64, text: &str, keyboard: Option<Value>) -> R<Value> {
+        let mut p = json!({"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_notification": true});
+        if let Some(kb) = keyboard {
+            p["reply_markup"] = json!({"inline_keyboard": kb});
+        }
+        self.call("sendMessage", 30, p)
+    }
+
     pub fn edit(&self, chat_id: i64, message_id: i64, text: &str, keyboard: Option<Value>) -> R<()> {
         let p = json!({"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": "HTML",
                        "reply_markup": {"inline_keyboard": keyboard.unwrap_or(json!([]))}});

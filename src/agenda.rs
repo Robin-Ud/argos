@@ -812,8 +812,9 @@ Só se for mesmo outra tarefa, chame criar_tarefa de novo com o mesmo texto.",
                 let rep = arg(args, "repetir_dias")?;
                 let rep = if rep.is_null() { None } else { Some(rep.as_f64().ok_or_else(|| Erro::Chave("repetir_dias".into()))? as i64) };
                 let from_done = verdade(arg(args, "contar_desde_feito")?);
-                let hora = self.config.hora_padrao_tarefa.clone();
-                let mut t = new_task(&mut self.state, &texto, &arg_str(args, "quando")?, rep, from_done, &hora)?;
+                let quando = arg_str(args, "quando")?;
+                let hora = self.hora_padrao_em(&quando);
+                let mut t = new_task(&mut self.state, &texto, &quando, rep, from_done, &hora)?;
                 let janelas = arg_janelas(args)?;
                 let habito = verdade(args.get("habito").unwrap_or(&Value::Null));
                 let intervalo = arg_intervalo(args)?;

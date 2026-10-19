@@ -30,12 +30,12 @@
   ],
   "dia_discussao": "sexta",
   "memoria_revisao_dias": 14,
-  "hora_revisao_memoria": "10:00",
 
   "motor_dir": "dados/motor",
   "git_sync": false,
-  "hora_manutencao": "06:00",
+  "hora_bom_dia": "06:00",
   "manutencao_repetir_dias": 3,
+  "manutencao_max_dias": 3,
   "espera_fotos_s": 12,
   "tolerancia_total": 0.03,
   "km_max_sem_registro": 3000,
@@ -44,7 +44,6 @@
   "clima_lon": -47.06,
   "chuva_limiar": 70,
   "hora_chuva_noite": "21:00",
-  "hora_chuva_manha": "06:30",
   "chuva_aviso": true,
 
   "postos_municipio": "CAMPINAS",
